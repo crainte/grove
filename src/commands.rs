@@ -831,10 +831,8 @@ pub fn complete(cmd: Option<&str>) -> Result<()> {
     // For everything else (go, path, first arg), include main branch too
     let include_main = cmd != Some("rm");
 
-    if include_main {
-        if let Ok(main_branch) = git::default_branch(&repo_root) {
-            println!("{}", main_branch);
-        }
+    if include_main && let Ok(main_branch) = git::default_branch(&repo_root) {
+        println!("{}", main_branch);
     }
 
     // Output all grove worktree branch names

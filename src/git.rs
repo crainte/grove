@@ -299,13 +299,13 @@ pub fn worktree_list(repo_root: &Path) -> Result<Vec<GitWorktree>> {
             current_branch = branch_ref.strip_prefix("refs/heads/").map(String::from);
         }
         // Empty line marks end of a worktree entry
-        else if line.is_empty() {
-            if let Some(path) = current_path.take() {
-                worktrees.push(GitWorktree {
-                    path,
-                    branch: current_branch.take(),
-                });
-            }
+        else if line.is_empty()
+            && let Some(path) = current_path.take()
+        {
+            worktrees.push(GitWorktree {
+                path,
+                branch: current_branch.take(),
+            });
         }
     }
 
