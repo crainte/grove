@@ -94,31 +94,47 @@ Base36 incrementing: `1`, `2`, ... `9`, `a`, `b`, ... `z`, `10`, ...
 
 ## Current State
 
-### Implemented & Tested
+### Fully Implemented
 - `meta.rs` — Metadata struct, serialization, ID generation, tree operations
 - `shell.rs` — Shell wrapper output for bash/zsh/fish
 - `cli.rs` — Full command structure with clap
+- `git.rs` — Git operations (worktree add/remove, branch ops, merge detection)
+- `copyfiles.rs` — Sync gitignored files between worktrees
+- `commands.rs` — All commands implemented:
+  - `go` — Navigate/create worktrees with fzf support, context-aware child lookup
+  - `add` — Create worktree without switching
+  - `rm` — Remove worktree and branch (with `--force` for dirty trees)
+  - `list/ls` — Tree rendering with orphan detection and dimmed styling
+  - `clean` — Remove merged worktrees (uses `git cherry` for squash-merge detection)
+  - `done` — cd to main, pull latest, clean merged worktrees
+  - `pull/push` — Copy gitignored files between main and current worktree
+  - `path` — Print path to named worktree
+  - `prune` — Delegate to `git worktree prune`
+  - `sync` — Import existing git worktrees into grove metadata
+  - `init` — Output shell integration script
+  - `complete` — Shell completion with context-aware worktree names
 
-### Stubbed (TODO)
-- All commands in `commands.rs` — need implementation
-- Integration tests with real git repos
+### Remaining Work
+- **Integration tests** — Test full command workflows in temp git repos
+- **Edge case hardening** — Error messages, validation
 
 ## Commands Reference
 
 | Command | Description |
 |---------|-------------|
-| `grove <name> [base]` | Go to worktree (create if needed) |
-| `grove go <name> [base]` | Explicit go |
+| `grove [name] [base]` | Go to worktree (create if needed); no args = fzf select |
+| `grove go [name] [base]` | Explicit go (same behavior) |
 | `grove add <name> [base]` | Create without switching |
-| `grove rm <name>` | Remove worktree and branch |
+| `grove rm <name> [--force]` | Remove worktree and branch |
 | `grove list` / `grove ls` | Show worktree tree |
-| `grove prune` | Clean stale references |
-| `grove clean [branch]` | Remove merged worktrees |
+| `grove prune` | Clean stale git worktree references |
+| `grove sync` | Import existing git worktrees into grove metadata |
+| `grove clean [branch]` | Remove worktrees merged into branch (default: main) |
 | `grove done` | cd to main, pull, clean |
 | `grove pull [paths...]` | Copy ignored files from main |
 | `grove push [paths...]` | Copy ignored files to main |
 | `grove path <name>` | Print path to worktree |
-| `grove init <shell>` | Output shell wrapper |
+| `grove init <shell>` | Output shell wrapper (bash/zsh/fish) |
 
 ## Configuration
 
@@ -132,7 +148,6 @@ git config --add grove.hook "mise trust"    # Post-create hooks
 
 - **Unit tests**: In each module (`meta.rs` has them)
 - **Integration tests**: Use `tempfile` + `assert_cmd` for full workflows
-- **TDD approach**: Write tests first, then implement
 
 ## Related Files
 
@@ -141,11 +156,8 @@ git config --add grove.hook "mise trust"    # Post-create hooks
 
 ## Next Steps
 
-1. Implement `commands::go()` — the core command
-2. Add git operations (worktree add/remove, branch operations)
-3. Implement `list` with tree rendering
-4. Integration tests
-5. Remaining commands (clean, done, pull/push, etc.)
+1. **Integration tests** — Full workflow tests with temp git repos
+2. **Release prep** — `cargo install` instructions, shell setup docs
 
 ## Design Decisions Log
 

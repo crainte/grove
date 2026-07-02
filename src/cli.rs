@@ -22,9 +22,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Go to worktree (create if needed)
+    /// Go to worktree (create if needed, or fzf select if no name)
     Go {
-        name: String,
+        #[arg(value_name = "NAME")]
+        name: Option<String>,
         #[arg(value_name = "BASE")]
         base: Option<String>,
     },
@@ -51,6 +52,9 @@ enum Commands {
 
     /// Clean stale worktree references
     Prune,
+
+    /// Sync database with git worktrees (import existing, remove stale)
+    Sync,
 
     /// Remove merged worktrees
     Clean {
@@ -81,6 +85,14 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+
+    /// Output completions (for shell integration)
+    #[command(hide = true)]
+    Complete {
+        /// Subcommand context (go, rm, path, etc.)
+        #[arg(value_name = "CMD")]
+        cmd: Option<String>,
+    },
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -92,12 +104,30 @@ enum Shell {
 
 impl Cli {
     pub fn run(&self) -> Result<()> {
+        // Check for orphaned worktree first (user stuck in deleted directory)
+        // Only check for commands that need repo context and have no explicit target
+        let needs_orphan_check = matches!(
+            (&self.command, &self.name),
+            (None, None) |  // bare `grove` -> list
+            (Some(Commands::List), _) |
+            (Some(Commands::Ls), _) |
+            (Some(Commands::Go { name: None, .. }), _)  // interactive go
+        );
+        
+        if needs_orphan_check {
+            if commands::check_orphaned_worktree()? {
+                return Ok(()); // Already handled - cd'd to main repo
+            }
+        }
+        
         match &self.command {
-            Some(Commands::Go { name, base }) => commands::go(name, base.as_deref()),
+            Some(Commands::Go { name: Some(name), base }) => commands::go(name, base.as_deref()),
+            Some(Commands::Go { name: None, .. }) => commands::go_interactive(),
             Some(Commands::Add { name, base }) => commands::add(name, base.as_deref()),
             Some(Commands::Rm { name, force }) => commands::rm(name, *force),
             Some(Commands::List) | Some(Commands::Ls) => commands::list(),
             Some(Commands::Prune) => commands::prune(),
+            Some(Commands::Sync) => commands::sync(),
             Some(Commands::Clean { branch }) => commands::clean(branch.as_deref()),
             Some(Commands::Done) => commands::done(),
             Some(Commands::Pull { paths }) => commands::pull(paths),
@@ -108,11 +138,13 @@ impl Cli {
                 Shell::Zsh => crate::shell::init_zsh(),
                 Shell::Fish => crate::shell::init_fish(),
             },
+            Some(Commands::Complete { cmd }) => commands::complete(cmd.as_deref()),
             None => {
                 // No subcommand - check for positional name arg
                 if let Some(name) = &self.name {
                     commands::go(name, self.base.as_deref())
                 } else {
+                    // No name - show list
                     commands::list()
                 }
             }

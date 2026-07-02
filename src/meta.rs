@@ -1,135 +1,375 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fs;
+use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 
-/// Metadata for all worktrees in a repository
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Meta {
-    pub version: u32,
-    pub worktrees: HashMap<String, WorktreeInfo>,
-    pub next_id: u32,
-}
-
 /// Information about a single worktree
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct WorktreeInfo {
     pub branch: String,
     pub parent: Option<String>,
     pub created: DateTime<Utc>,
 }
 
-impl Default for Meta {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            worktrees: HashMap::new(),
-            next_id: 1,
-        }
-    }
+/// Metadata database for worktrees in a repository
+pub struct Meta {
+    conn: Connection,
+    repo_root: PathBuf,
 }
 
 impl Meta {
-    /// Load metadata from .git/wt/meta.json, or create default if not exists
-    pub fn load(repo_root: &Path) -> Result<Self> {
-        let path = Self::meta_path(repo_root);
-        if path.exists() {
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read {}", path.display()))?;
-            serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse {}", path.display()))
+    /// Open or create the metadata database
+    pub fn open(repo_root: &Path) -> Result<Self> {
+        let db_path = Self::db_path(repo_root);
+        
+        // Ensure parent directory exists
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        
+        let conn = Connection::open(&db_path)
+            .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
+        
+        // Enable WAL mode for better concurrency
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        // Disable FK enforcement - we handle orphan relationships in code
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+        
+        // Initialize schema
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS worktrees (
+                id TEXT PRIMARY KEY,
+                branch TEXT NOT NULL UNIQUE,
+                parent TEXT,
+                created TEXT NOT NULL
+            );
+            
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value INTEGER NOT NULL
+            );
+            
+            INSERT OR IGNORE INTO meta (key, value) VALUES ('next_id', 1);"
+        )?;
+        
+        Ok(Self {
+            conn,
+            repo_root: repo_root.to_path_buf(),
+        })
+    }
+    
+    /// Get the path to the database file
+    fn db_path(repo_root: &Path) -> PathBuf {
+        repo_root.join(".git/wt/grove.db")
+    }
+    
+    /// Generate the next worktree ID (base36) atomically
+    pub fn next_id(&self) -> Result<String> {
+        let id: u32 = self.conn.query_row(
+            "UPDATE meta SET value = value + 1 WHERE key = 'next_id' RETURNING value - 1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(base36_encode(id))
+    }
+    
+    /// Add a new worktree atomically, returns the assigned ID
+    pub fn add_worktree(&self, branch: &str, parent: Option<&str>) -> Result<String> {
+        let id = self.next_id()?;
+        let created = Utc::now().to_rfc3339();
+        
+        self.conn.execute(
+            "INSERT INTO worktrees (id, branch, parent, created) VALUES (?1, ?2, ?3, ?4)",
+            params![id, branch, parent, created],
+        ).with_context(|| format!("Failed to add worktree '{}'", branch))?;
+        
+        Ok(id)
+    }
+    
+    /// Remove a worktree by ID (children keep their parent reference, becoming orphans)
+    pub fn remove_worktree(&self, id: &str) -> Result<Option<WorktreeInfo>> {
+        // First get the info
+        let info = self.get_worktree(id)?;
+        
+        if info.is_some() {
+            // Just delete - children keep their parent ID, becoming "orphans"
+            // This preserves their depth in the tree display
+            self.conn.execute("DELETE FROM worktrees WHERE id = ?1", params![id])?;
+        }
+        
+        Ok(info)
+    }
+    
+    /// Get worktree info by ID
+    pub fn get_worktree(&self, id: &str) -> Result<Option<WorktreeInfo>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT branch, parent, created FROM worktrees WHERE id = ?1"
+        )?;
+        
+        let mut rows = stmt.query(params![id])?;
+        
+        if let Some(row) = rows.next()? {
+            let branch: String = row.get(0)?;
+            let parent: Option<String> = row.get(1)?;
+            let created_str: String = row.get(2)?;
+            let created = DateTime::parse_from_rfc3339(&created_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            
+            Ok(Some(WorktreeInfo { branch, parent, created }))
         } else {
-            Ok(Self::default())
+            Ok(None)
         }
     }
-
-    /// Save metadata to .git/wt/meta.json
-    pub fn save(&self, repo_root: &Path) -> Result<()> {
-        let path = Self::meta_path(repo_root);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let content = serde_json::to_string_pretty(self)?;
-        fs::write(&path, content)?;
-        Ok(())
-    }
-
-    /// Get the path to meta.json
-    fn meta_path(repo_root: &Path) -> PathBuf {
-        repo_root.join(".git/wt/meta.json")
-    }
-
-    /// Generate the next worktree ID (base36)
-    pub fn next_id(&mut self) -> String {
-        let id = base36_encode(self.next_id);
-        self.next_id += 1;
-        id
-    }
-
-    /// Add a new worktree
-    pub fn add_worktree(&mut self, branch: &str, parent: Option<&str>) -> String {
-        let id = self.next_id();
-        self.worktrees.insert(
-            id.clone(),
-            WorktreeInfo {
-                branch: branch.to_string(),
-                parent: parent.map(String::from),
-                created: Utc::now(),
-            },
-        );
-        id
-    }
-
-    /// Remove a worktree by ID
-    pub fn remove_worktree(&mut self, id: &str) -> Option<WorktreeInfo> {
-        self.worktrees.remove(id)
-    }
-
+    
     /// Find worktree ID by branch name
-    pub fn find_by_branch(&self, branch: &str) -> Option<&str> {
-        self.worktrees
-            .iter()
-            .find(|(_, info)| info.branch == branch)
-            .map(|(id, _)| id.as_str())
+    pub fn find_by_branch(&self, branch: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM worktrees WHERE branch = ?1"
+        )?;
+        
+        let mut rows = stmt.query(params![branch])?;
+        
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
     }
-
+    
     /// Find worktree ID by branch name, preferring children of given parent
-    pub fn find_by_branch_with_context(&self, branch: &str, parent_id: Option<&str>) -> Option<&str> {
+    pub fn find_by_branch_with_context(&self, branch: &str, parent_id: Option<&str>) -> Result<Option<String>> {
         // First try to find a child of the current worktree
         if let Some(pid) = parent_id {
-            if let Some((id, _)) = self.worktrees.iter().find(|(_, info)| {
-                info.branch == branch && info.parent.as_deref() == Some(pid)
-            }) {
-                return Some(id.as_str());
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM worktrees WHERE branch = ?1 AND parent = ?2"
+            )?;
+            
+            let mut rows = stmt.query(params![branch, pid])?;
+            
+            if let Some(row) = rows.next()? {
+                return Ok(Some(row.get(0)?));
             }
         }
+        
         // Fall back to any match
         self.find_by_branch(branch)
     }
-
+    
     /// Get worktree path
-    pub fn worktree_path(&self, repo_root: &Path, id: &str) -> PathBuf {
-        repo_root.join(".git/wt").join(id)
+    pub fn worktree_path(&self, id: &str) -> PathBuf {
+        self.repo_root.join(".git/wt").join(id)
+    }
+    
+    /// Get children of a worktree, sorted by branch name
+    pub fn children(&self, parent_id: &str) -> Result<Vec<(String, WorktreeInfo)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, branch, parent, created FROM worktrees 
+             WHERE parent = ?1 ORDER BY branch"
+        )?;
+        
+        let rows = stmt.query_map(params![parent_id], |row| {
+            let id: String = row.get(0)?;
+            let branch: String = row.get(1)?;
+            let parent: Option<String> = row.get(2)?;
+            let created_str: String = row.get(3)?;
+            Ok((id, branch, parent, created_str))
+        })?;
+        
+        let mut result = Vec::new();
+        for row in rows {
+            let (id, branch, parent, created_str) = row?;
+            let created = DateTime::parse_from_rfc3339(&created_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            result.push((id, WorktreeInfo { branch, parent, created }));
+        }
+        
+        Ok(result)
+    }
+    
+    /// Get top-level worktrees (no parent), sorted by branch name
+    pub fn top_level(&self) -> Result<Vec<(String, WorktreeInfo)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, branch, parent, created FROM worktrees 
+             WHERE parent IS NULL ORDER BY branch"
+        )?;
+        
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let branch: String = row.get(1)?;
+            let parent: Option<String> = row.get(2)?;
+            let created_str: String = row.get(3)?;
+            Ok((id, branch, parent, created_str))
+        })?;
+        
+        let mut result = Vec::new();
+        for row in rows {
+            let (id, branch, parent, created_str) = row?;
+            let created = DateTime::parse_from_rfc3339(&created_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            result.push((id, WorktreeInfo { branch, parent, created }));
+        }
+        
+        Ok(result)
     }
 
-    /// Get children of a worktree
-    pub fn children(&self, parent_id: &str) -> Vec<(&str, &WorktreeInfo)> {
-        self.worktrees
-            .iter()
-            .filter(|(_, info)| info.parent.as_deref() == Some(parent_id))
-            .map(|(id, info)| (id.as_str(), info))
-            .collect()
+    /// Get all worktrees
+    pub fn all(&self) -> Result<Vec<(String, WorktreeInfo)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, branch, parent, created FROM worktrees ORDER BY branch"
+        )?;
+        
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let branch: String = row.get(1)?;
+            let parent: Option<String> = row.get(2)?;
+            let created_str: String = row.get(3)?;
+            Ok((id, branch, parent, created_str))
+        })?;
+        
+        let mut result = Vec::new();
+        for row in rows {
+            let (id, branch, parent, created_str) = row?;
+            let created = DateTime::parse_from_rfc3339(&created_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            result.push((id, WorktreeInfo { branch, parent, created }));
+        }
+        
+        Ok(result)
     }
 
-    /// Get top-level worktrees (no parent)
-    pub fn top_level(&self) -> Vec<(&str, &WorktreeInfo)> {
-        self.worktrees
-            .iter()
-            .filter(|(_, info)| info.parent.is_none())
-            .map(|(id, info)| (id.as_str(), info))
-            .collect()
+    /// Get orphaned worktrees (parent ID set but parent doesn't exist)
+    /// Returns tuples of (id, info, depth) where depth is how many missing ancestors
+    pub fn orphans(&self) -> Result<Vec<(String, WorktreeInfo, usize)>> {
+        // Get all worktrees with a parent set
+        let mut stmt = self.conn.prepare(
+            "SELECT w.id, w.branch, w.parent, w.created
+             FROM worktrees w
+             WHERE w.parent IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM worktrees p WHERE p.id = w.parent)
+             ORDER BY w.branch"
+        )?;
+        
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let branch: String = row.get(1)?;
+            let parent: Option<String> = row.get(2)?;
+            let created_str: String = row.get(3)?;
+            Ok((id, branch, parent, created_str))
+        })?;
+        
+        let mut result = Vec::new();
+        for row in rows {
+            let (id, branch, parent, created_str) = row?;
+            let created = DateTime::parse_from_rfc3339(&created_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            
+            // Calculate depth by counting missing ancestors
+            let depth = self.orphan_depth(&parent)?;
+            result.push((id, WorktreeInfo { branch, parent, created }, depth));
+        }
+        
+        Ok(result)
+    }
+    
+    /// Calculate how deep an orphan is (count missing ancestors + 1)
+    fn orphan_depth(&self, parent_id: &Option<String>) -> Result<usize> {
+        let mut depth = 1usize;
+        let current = parent_id.clone();
+        
+        while let Some(pid) = current {
+            // Check if this parent exists
+            if self.get_worktree(&pid)?.is_some() {
+                // Found a real ancestor - this shouldn't happen for orphans at depth 1
+                // but handles chains like: A -> B (deleted) -> C
+                break;
+            }
+            depth += 1;
+            // We can't look up the deleted parent's parent, so stop here
+            // For deeper orphan chains, we'd need to track deleted parents separately
+            break;
+        }
+        
+        Ok(depth)
+    }
+
+    /// Remove a worktree by ID (simpler version for clean)
+    pub fn remove(&self, id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM worktrees WHERE id = ?", params![id])?;
+        Ok(())
+    }
+
+    /// Sync database with git worktrees
+    /// Returns (imported, removed) counts
+    pub fn sync(&self, git_worktrees: &[crate::git::GitWorktree]) -> Result<(usize, usize)> {
+        let wt_dir = self.repo_root.join(".git/wt");
+        let mut imported = 0;
+        let mut removed = 0;
+        
+        // Import worktrees that exist in git but not in our database
+        for wt in git_worktrees {
+            // Skip if not under our .git/wt/ directory
+            if !wt.path.starts_with(&wt_dir) {
+                continue;
+            }
+            
+            // Extract ID from path (last component)
+            let id = match wt.path.file_name().and_then(|s| s.to_str()) {
+                Some(id) => id,
+                None => continue,
+            };
+            
+            // Skip if already in database
+            if self.get_worktree(id)?.is_some() {
+                continue;
+            }
+            
+            // Get branch name
+            let branch = match &wt.branch {
+                Some(b) => b.clone(),
+                None => continue, // Skip detached HEAD worktrees
+            };
+            
+            // Import it
+            let created = chrono::Utc::now().to_rfc3339();
+            self.conn.execute(
+                "INSERT OR IGNORE INTO worktrees (id, branch, parent, created) VALUES (?1, ?2, NULL, ?3)",
+                rusqlite::params![id, branch, created],
+            )?;
+            
+            // Update next_id if needed
+            if let Ok(id_num) = u32::from_str_radix(id, 36) {
+                self.conn.execute(
+                    "UPDATE meta SET value = MAX(value, ?1 + 1) WHERE key = 'next_id'",
+                    rusqlite::params![id_num],
+                )?;
+            }
+            
+            imported += 1;
+        }
+        
+        // Remove entries that no longer exist in git
+        let our_worktrees: Vec<String> = {
+            let mut stmt = self.conn.prepare("SELECT id FROM worktrees")?;
+            let rows = stmt.query_map([], |row| row.get(0))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        
+        for id in our_worktrees {
+            let our_path = wt_dir.join(&id);
+            let exists_in_git = git_worktrees.iter().any(|wt| wt.path == our_path);
+            
+            if !exists_in_git && !our_path.exists() {
+                self.conn.execute("DELETE FROM worktrees WHERE id = ?1", rusqlite::params![id])?;
+                removed += 1;
+            }
+        }
+        
+        Ok((imported, removed))
     }
 }
 
@@ -151,69 +391,112 @@ fn base36_encode(mut n: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use tempfile::TempDir;
+    
+    fn setup() -> (TempDir, Meta) {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git/wt")).unwrap();
+        let meta = Meta::open(dir.path()).unwrap();
+        (dir, meta)
+    }
+    
+    #[test]
+    fn test_next_id_increments() {
+        let (_dir, meta) = setup();
+        assert_eq!(meta.next_id().unwrap(), "1");
+        assert_eq!(meta.next_id().unwrap(), "2");
+        assert_eq!(meta.next_id().unwrap(), "3");
+    }
+    
+    #[test]
+    fn test_add_worktree() {
+        let (_dir, meta) = setup();
+        let id = meta.add_worktree("feature/test", None).unwrap();
+        assert_eq!(id, "1");
+        
+        let info = meta.get_worktree("1").unwrap().unwrap();
+        assert_eq!(info.branch, "feature/test");
+        assert!(info.parent.is_none());
+    }
+    
+    #[test]
+    fn test_add_worktree_with_parent() {
+        let (_dir, meta) = setup();
+        let parent_id = meta.add_worktree("parent", None).unwrap();
+        let child_id = meta.add_worktree("child", Some(&parent_id)).unwrap();
+        
+        let info = meta.get_worktree(&child_id).unwrap().unwrap();
+        assert_eq!(info.parent, Some(parent_id));
+    }
+    
+    #[test]
+    fn test_find_by_branch() {
+        let (_dir, meta) = setup();
+        meta.add_worktree("feature/test", None).unwrap();
+        
+        assert_eq!(meta.find_by_branch("feature/test").unwrap(), Some("1".to_string()));
+        assert_eq!(meta.find_by_branch("nonexistent").unwrap(), None);
+    }
+    
+    #[test]
+    fn test_remove_worktree() {
+        let (_dir, meta) = setup();
+        meta.add_worktree("test", None).unwrap();
+        
+        let removed = meta.remove_worktree("1").unwrap();
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().branch, "test");
+        
+        assert!(meta.get_worktree("1").unwrap().is_none());
+    }
+    
+    #[test]
+    fn test_top_level() {
+        let (_dir, meta) = setup();
+        meta.add_worktree("beta", None).unwrap();
+        meta.add_worktree("alpha", None).unwrap();
+        
+        let top = meta.top_level().unwrap();
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].1.branch, "alpha"); // sorted
+        assert_eq!(top[1].1.branch, "beta");
+    }
+    
+    #[test]
+    fn test_children() {
+        let (_dir, meta) = setup();
+        let parent = meta.add_worktree("parent", None).unwrap();
+        meta.add_worktree("child-b", Some(&parent)).unwrap();
+        meta.add_worktree("child-a", Some(&parent)).unwrap();
+        
+        let children = meta.children(&parent).unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].1.branch, "child-a"); // sorted
+        assert_eq!(children[1].1.branch, "child-b");
+    }
+    
     #[test]
     fn test_base36_encode() {
         assert_eq!(base36_encode(0), "0");
-        assert_eq!(base36_encode(1), "1");
         assert_eq!(base36_encode(9), "9");
         assert_eq!(base36_encode(10), "a");
         assert_eq!(base36_encode(35), "z");
         assert_eq!(base36_encode(36), "10");
-        assert_eq!(base36_encode(100), "2s");
+        assert_eq!(base36_encode(4329), "3c9");
     }
-
+    
     #[test]
-    fn test_meta_default() {
-        let meta = Meta::default();
-        assert_eq!(meta.version, 1);
-        assert!(meta.worktrees.is_empty());
-        assert_eq!(meta.next_id, 1);
-    }
-
-    #[test]
-    fn test_add_worktree() {
-        let mut meta = Meta::default();
-        let id1 = meta.add_worktree("feature/auth", None);
-        let id2 = meta.add_worktree("sub-task", Some(&id1));
+    fn test_find_by_branch_with_context() {
+        let (_dir, meta) = setup();
+        let parent = meta.add_worktree("parent", None).unwrap();
+        let child_id = meta.add_worktree("child", Some(&parent)).unwrap();
         
-        assert_eq!(id1, "1");
-        assert_eq!(id2, "2");
-        assert_eq!(meta.worktrees.len(), 2);
-        assert_eq!(meta.worktrees[&id1].branch, "feature/auth");
-        assert_eq!(meta.worktrees[&id2].parent, Some(id1.clone()));
-    }
-
-    #[test]
-    fn test_find_by_branch() {
-        let mut meta = Meta::default();
-        let id = meta.add_worktree("feature/test", None);
+        // When we have context (parent), we should find the child
+        let found = meta.find_by_branch_with_context("child", Some(&parent)).unwrap();
+        assert_eq!(found, Some(child_id.clone()));
         
-        assert_eq!(meta.find_by_branch("feature/test"), Some(id.as_str()));
-        assert_eq!(meta.find_by_branch("nonexistent"), None);
-    }
-
-    #[test]
-    fn test_children() {
-        let mut meta = Meta::default();
-        let parent_id = meta.add_worktree("parent", None);
-        meta.add_worktree("child1", Some(&parent_id));
-        meta.add_worktree("child2", Some(&parent_id));
-        meta.add_worktree("other", None);
-        
-        let children = meta.children(&parent_id);
-        assert_eq!(children.len(), 2);
-    }
-
-    #[test]
-    fn test_serialization() {
-        let mut meta = Meta::default();
-        meta.add_worktree("test", None);
-        
-        let json = serde_json::to_string(&meta).unwrap();
-        let restored: Meta = serde_json::from_str(&json).unwrap();
-        
-        assert_eq!(restored.version, meta.version);
-        assert_eq!(restored.next_id, meta.next_id);
+        // Without context, we still find it
+        let found = meta.find_by_branch_with_context("child", None).unwrap();
+        assert_eq!(found, Some(child_id));
     }
 }
