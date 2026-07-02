@@ -1,15 +1,12 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
 /// Information about a single worktree
-#[allow(dead_code)] // Fields used in tests and SQL relationships
 #[derive(Debug, Clone)]
 pub struct WorktreeInfo {
     pub branch: String,
-    pub parent: Option<String>,
-    pub created: DateTime<Utc>,
 }
 
 /// Metadata database for worktrees in a repository
@@ -108,23 +105,13 @@ impl Meta {
     pub fn get_worktree(&self, id: &str) -> Result<Option<WorktreeInfo>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT branch, parent, created FROM worktrees WHERE id = ?1")?;
+            .prepare("SELECT branch FROM worktrees WHERE id = ?1")?;
 
         let mut rows = stmt.query(params![id])?;
 
         if let Some(row) = rows.next()? {
             let branch: String = row.get(0)?;
-            let parent: Option<String> = row.get(1)?;
-            let created_str: String = row.get(2)?;
-            let created = DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-
-            Ok(Some(WorktreeInfo {
-                branch,
-                parent,
-                created,
-            }))
+            Ok(Some(WorktreeInfo { branch }))
         } else {
             Ok(None)
         }
@@ -176,32 +163,20 @@ impl Meta {
     /// Get children of a worktree, sorted by branch name
     pub fn children(&self, parent_id: &str) -> Result<Vec<(String, WorktreeInfo)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, branch, parent, created FROM worktrees 
+            "SELECT id, branch FROM worktrees 
              WHERE parent = ?1 ORDER BY branch",
         )?;
 
         let rows = stmt.query_map(params![parent_id], |row| {
             let id: String = row.get(0)?;
             let branch: String = row.get(1)?;
-            let parent: Option<String> = row.get(2)?;
-            let created_str: String = row.get(3)?;
-            Ok((id, branch, parent, created_str))
+            Ok((id, branch))
         })?;
 
         let mut result = Vec::new();
         for row in rows {
-            let (id, branch, parent, created_str) = row?;
-            let created = DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            result.push((
-                id,
-                WorktreeInfo {
-                    branch,
-                    parent,
-                    created,
-                },
-            ));
+            let (id, branch) = row?;
+            result.push((id, WorktreeInfo { branch }));
         }
 
         Ok(result)
@@ -210,32 +185,20 @@ impl Meta {
     /// Get top-level worktrees (no parent), sorted by branch name
     pub fn top_level(&self) -> Result<Vec<(String, WorktreeInfo)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, branch, parent, created FROM worktrees 
+            "SELECT id, branch FROM worktrees 
              WHERE parent IS NULL ORDER BY branch",
         )?;
 
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let branch: String = row.get(1)?;
-            let parent: Option<String> = row.get(2)?;
-            let created_str: String = row.get(3)?;
-            Ok((id, branch, parent, created_str))
+            Ok((id, branch))
         })?;
 
         let mut result = Vec::new();
         for row in rows {
-            let (id, branch, parent, created_str) = row?;
-            let created = DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            result.push((
-                id,
-                WorktreeInfo {
-                    branch,
-                    parent,
-                    created,
-                },
-            ));
+            let (id, branch) = row?;
+            result.push((id, WorktreeInfo { branch }));
         }
 
         Ok(result)
@@ -245,30 +208,18 @@ impl Meta {
     pub fn all(&self) -> Result<Vec<(String, WorktreeInfo)>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, branch, parent, created FROM worktrees ORDER BY branch")?;
+            .prepare("SELECT id, branch FROM worktrees ORDER BY branch")?;
 
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let branch: String = row.get(1)?;
-            let parent: Option<String> = row.get(2)?;
-            let created_str: String = row.get(3)?;
-            Ok((id, branch, parent, created_str))
+            Ok((id, branch))
         })?;
 
         let mut result = Vec::new();
         for row in rows {
-            let (id, branch, parent, created_str) = row?;
-            let created = DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            result.push((
-                id,
-                WorktreeInfo {
-                    branch,
-                    parent,
-                    created,
-                },
-            ));
+            let (id, branch) = row?;
+            result.push((id, WorktreeInfo { branch }));
         }
 
         Ok(result)
@@ -277,9 +228,9 @@ impl Meta {
     /// Get orphaned worktrees (parent ID set but parent doesn't exist)
     /// Returns tuples of (id, info, depth) where depth is how many missing ancestors
     pub fn orphans(&self) -> Result<Vec<(String, WorktreeInfo, usize)>> {
-        // Get all worktrees with a parent set
+        // Get all worktrees with a parent set but parent doesn't exist
         let mut stmt = self.conn.prepare(
-            "SELECT w.id, w.branch, w.parent, w.created
+            "SELECT w.id, w.branch, w.parent
              FROM worktrees w
              WHERE w.parent IS NOT NULL
              AND NOT EXISTS (SELECT 1 FROM worktrees p WHERE p.id = w.parent)
@@ -290,28 +241,15 @@ impl Meta {
             let id: String = row.get(0)?;
             let branch: String = row.get(1)?;
             let parent: Option<String> = row.get(2)?;
-            let created_str: String = row.get(3)?;
-            Ok((id, branch, parent, created_str))
+            Ok((id, branch, parent))
         })?;
 
         let mut result = Vec::new();
         for row in rows {
-            let (id, branch, parent, created_str) = row?;
-            let created = DateTime::parse_from_rfc3339(&created_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-
+            let (id, branch, parent) = row?;
             // Calculate depth by counting missing ancestors
             let depth = self.orphan_depth(&parent)?;
-            result.push((
-                id,
-                WorktreeInfo {
-                    branch,
-                    parent,
-                    created,
-                },
-                depth,
-            ));
+            result.push((id, WorktreeInfo { branch }, depth));
         }
 
         Ok(result)
@@ -445,7 +383,6 @@ mod tests {
 
         let info = meta.get_worktree("1").unwrap().unwrap();
         assert_eq!(info.branch, "feature/test");
-        assert!(info.parent.is_none());
     }
 
     #[test]
@@ -454,8 +391,11 @@ mod tests {
         let parent_id = meta.add_worktree("parent", None).unwrap();
         let child_id = meta.add_worktree("child", Some(&parent_id)).unwrap();
 
-        let info = meta.get_worktree(&child_id).unwrap().unwrap();
-        assert_eq!(info.parent, Some(parent_id));
+        // Verify parent-child relationship via children()
+        let children = meta.children(&parent_id).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].0, child_id);
+        assert_eq!(children[0].1.branch, "child");
     }
 
     #[test]
