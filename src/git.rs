@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -30,7 +30,9 @@ pub fn find_repo_root() -> Result<PathBuf> {
     let git_common_abs = if git_common_path.is_absolute() {
         git_common_path
     } else {
-        std::env::current_dir()?.join(&git_common_path).canonicalize()?
+        std::env::current_dir()?
+            .join(&git_common_path)
+            .canonicalize()?
     };
 
     // Parent of .git is repo root
@@ -45,7 +47,7 @@ pub fn find_repo_root() -> Result<PathBuf> {
 fn detect_orphaned_worktree() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     let cwd_str = cwd.to_str()?;
-    
+
     // Check if path contains /.git/wt/
     if let Some(idx) = cwd_str.find("/.git/wt/") {
         let main_repo = PathBuf::from(&cwd_str[..idx]);
@@ -54,7 +56,7 @@ fn detect_orphaned_worktree() -> Option<PathBuf> {
             return Some(main_repo);
         }
     }
-    
+
     None
 }
 
@@ -241,9 +243,7 @@ pub fn grove_config(repo_root: &Path, key: &str) -> Result<Option<String>> {
         .context("Failed to execute git config")?;
 
     if output.status.success() {
-        let value = String::from_utf8(output.stdout)?
-            .trim()
-            .to_string();
+        let value = String::from_utf8(output.stdout)?.trim().to_string();
         Ok(Some(value))
     } else {
         Ok(None)
@@ -296,9 +296,7 @@ pub fn worktree_list(repo_root: &Path) -> Result<Vec<GitWorktree>> {
             current_branch = None;
         } else if let Some(branch_ref) = line.strip_prefix("branch ") {
             // Extract branch name from refs/heads/name
-            current_branch = branch_ref
-                .strip_prefix("refs/heads/")
-                .map(String::from);
+            current_branch = branch_ref.strip_prefix("refs/heads/").map(String::from);
         }
         // Empty line marks end of a worktree entry
         else if line.is_empty() {
@@ -335,7 +333,7 @@ pub fn has_fzf() -> bool {
 pub fn fzf_select(choices: &[String], prompt: &str) -> Result<Option<String>> {
     use std::io::Write;
     use std::process::Stdio;
-    
+
     let mut child = Command::new("fzf")
         .args(["--prompt", prompt, "--height", "40%", "--reverse"])
         .stdin(Stdio::piped())
@@ -343,20 +341,18 @@ pub fn fzf_select(choices: &[String], prompt: &str) -> Result<Option<String>> {
         .stderr(Stdio::inherit())
         .spawn()
         .context("Failed to spawn fzf")?;
-    
+
     // Write choices to fzf stdin
     if let Some(mut stdin) = child.stdin.take() {
         for choice in choices {
             writeln!(stdin, "{}", choice)?;
         }
     }
-    
+
     let output = child.wait_with_output()?;
-    
+
     if output.status.success() {
-        let selection = String::from_utf8(output.stdout)?
-            .trim()
-            .to_string();
+        let selection = String::from_utf8(output.stdout)?.trim().to_string();
         if selection.is_empty() {
             Ok(None)
         } else {

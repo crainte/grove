@@ -1,13 +1,13 @@
 mod cli;
 mod commands;
+mod copyfiles;
 mod git;
 mod meta;
 mod shell;
-mod copyfiles;
 
-use std::io::IsTerminal;
 use clap::Parser;
 use colored::Colorize;
+use std::io::IsTerminal;
 
 fn main() {
     // Force colors if stderr is a TTY (colored crate only checks stdout)

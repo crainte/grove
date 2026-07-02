@@ -62,7 +62,7 @@ _g_complete() {{
 complete -F _g_complete g
 "#
     );
-    
+
     Ok(())
 }
 
@@ -122,7 +122,7 @@ _g_complete() {{
 compdef _g_complete g
 "#
     );
-    
+
     Ok(())
 }
 
@@ -159,7 +159,7 @@ complete -c g -f -n '__fish_seen_subcommand_from rm' -a '(__grove_worktrees rm)'
 complete -c g -f -n '__fish_seen_subcommand_from add' -a '(git branch --format="%(refname:short)" 2>/dev/null)'
 "#
     );
-    
+
     Ok(())
 }
 

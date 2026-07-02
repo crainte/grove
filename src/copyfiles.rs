@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::fs;
 
 /// Get list of ignored files in a worktree
 pub fn list_ignored_files(worktree: &Path) -> Result<Vec<String>> {
@@ -45,11 +45,7 @@ pub fn filter_by_paths(files: Vec<String>, paths: &[String]) -> Vec<String> {
 }
 
 /// Copy files from source to destination with parallel I/O and progress bar
-pub fn copy_files_parallel(
-    files: &[String],
-    src_root: &Path,
-    dest_root: &Path,
-) -> Result<usize> {
+pub fn copy_files_parallel(files: &[String], src_root: &Path, dest_root: &Path) -> Result<usize> {
     if files.is_empty() {
         return Ok(0);
     }
@@ -97,7 +93,7 @@ pub fn sync_ignored(
 ) -> Result<(usize, Vec<String>)> {
     // Get ignored files from source
     let files = list_ignored_files(src_worktree)?;
-    
+
     // Filter by paths if specified
     let files = filter_by_paths(files, paths);
 

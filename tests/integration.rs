@@ -7,27 +7,27 @@ use tempfile::TempDir;
 /// Create a temporary git repository for testing
 fn setup_git_repo() -> TempDir {
     let dir = TempDir::new().unwrap();
-    
+
     // Initialize git repo
     StdCommand::new("git")
         .args(["init"])
         .current_dir(dir.path())
         .output()
         .expect("Failed to init git repo");
-    
+
     // Configure git user for commits
     StdCommand::new("git")
         .args(["config", "user.email", "test@test.com"])
         .current_dir(dir.path())
         .output()
         .expect("Failed to config git");
-    
+
     StdCommand::new("git")
         .args(["config", "user.name", "Test"])
         .current_dir(dir.path())
         .output()
         .expect("Failed to config git");
-    
+
     // Create initial commit (required for worktrees)
     fs::write(dir.path().join("README.md"), "# Test Repo").unwrap();
     StdCommand::new("git")
@@ -35,20 +35,20 @@ fn setup_git_repo() -> TempDir {
         .current_dir(dir.path())
         .output()
         .expect("Failed to git add");
-    
+
     StdCommand::new("git")
         .args(["commit", "-m", "Initial commit"])
         .current_dir(dir.path())
         .output()
         .expect("Failed to git commit");
-    
+
     // Rename branch to main (git might default to master)
     StdCommand::new("git")
         .args(["branch", "-M", "main"])
         .current_dir(dir.path())
         .output()
         .expect("Failed to rename branch");
-    
+
     dir
 }
 
@@ -63,7 +63,7 @@ fn grove() -> Command {
 #[test]
 fn test_list_shows_header() {
     let repo = setup_git_repo();
-    
+
     grove()
         .arg("list")
         .current_dir(repo.path())
@@ -76,7 +76,7 @@ fn test_list_shows_header() {
 #[test]
 fn test_list_shows_repo_info() {
     let repo = setup_git_repo();
-    
+
     grove()
         .arg("list")
         .current_dir(repo.path())
@@ -89,7 +89,7 @@ fn test_list_shows_repo_info() {
 #[test]
 fn test_list_shows_current_marker() {
     let repo = setup_git_repo();
-    
+
     grove()
         .arg("list")
         .current_dir(repo.path())
@@ -102,14 +102,14 @@ fn test_list_shows_current_marker() {
 #[test]
 fn test_list_shows_path_below_worktree() {
     let repo = setup_git_repo();
-    
+
     // Create a worktree first
     grove()
         .args(["add", "feature-test"])
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     // List should show the path below the worktree name
     grove()
         .arg("list")
@@ -123,7 +123,7 @@ fn test_list_shows_path_below_worktree() {
 #[test]
 fn test_list_shows_suggestion() {
     let repo = setup_git_repo();
-    
+
     grove()
         .arg("list")
         .current_dir(repo.path())
@@ -136,7 +136,7 @@ fn test_list_shows_suggestion() {
 #[test]
 fn test_list_tree_connectors_single() {
     let repo = setup_git_repo();
-    
+
     // With only main, should use └─
     grove()
         .arg("list")
@@ -149,11 +149,19 @@ fn test_list_tree_connectors_single() {
 #[test]
 fn test_list_tree_connectors_multiple() {
     let repo = setup_git_repo();
-    
+
     // Create two worktrees
-    grove().args(["add", "first"]).current_dir(repo.path()).assert().success();
-    grove().args(["add", "second"]).current_dir(repo.path()).assert().success();
-    
+    grove()
+        .args(["add", "first"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    grove()
+        .args(["add", "second"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
     // With multiple items: ├─ for non-last, └─ for last only
     grove()
         .arg("list")
@@ -171,22 +179,22 @@ fn test_list_tree_connectors_multiple() {
 #[test]
 fn test_add_creates_worktree() {
     let repo = setup_git_repo();
-    
+
     grove()
         .args(["add", "feature-test"])
         .current_dir(repo.path())
         .assert()
         .success()
         .stderr(predicate::str::contains("Creating worktree"));
-    
+
     // Verify worktree exists
     let wt_dir = repo.path().join(".git/wt");
     assert!(wt_dir.exists(), "Worktree directory should exist");
-    
+
     // Verify database exists
     let db_path = wt_dir.join("grove.db");
     assert!(db_path.exists(), "grove.db should exist");
-    
+
     // Verify branch was created
     let output = StdCommand::new("git")
         .args(["branch", "--list", "feature-test"])
@@ -202,7 +210,7 @@ fn test_add_creates_worktree() {
 #[test]
 fn test_add_with_base_branch() {
     let repo = setup_git_repo();
-    
+
     grove()
         .args(["add", "feature-test", "main"])
         .current_dir(repo.path())
@@ -214,22 +222,30 @@ fn test_add_with_base_branch() {
 #[test]
 fn test_add_copies_ignored_files_when_enabled() {
     let repo = setup_git_repo();
-    
+
     // Enable copyignored
     StdCommand::new("git")
         .args(["config", "grove.copyignored", "true"])
         .current_dir(repo.path())
         .output()
         .unwrap();
-    
+
     // Create .gitignore
     fs::write(repo.path().join(".gitignore"), ".env\n").unwrap();
-    StdCommand::new("git").args(["add", ".gitignore"]).current_dir(repo.path()).output().unwrap();
-    StdCommand::new("git").args(["commit", "-m", "add gitignore"]).current_dir(repo.path()).output().unwrap();
-    
+    StdCommand::new("git")
+        .args(["add", ".gitignore"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "add gitignore"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
     // Create ignored file
     fs::write(repo.path().join(".env"), "SECRET=123").unwrap();
-    
+
     // Create worktree - should auto-copy ignored files
     grove()
         .args(["add", "feature"])
@@ -237,9 +253,13 @@ fn test_add_copies_ignored_files_when_enabled() {
         .assert()
         .success()
         .stderr(predicate::str::contains("Copying"));
-    
+
     // Verify file was auto-copied
-    let output = grove().args(["path", "feature"]).current_dir(repo.path()).output().unwrap();
+    let output = grove()
+        .args(["path", "feature"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
     let wt_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert!(std::path::Path::new(&wt_path).join(".env").exists());
 }
@@ -247,22 +267,30 @@ fn test_add_copies_ignored_files_when_enabled() {
 #[test]
 fn test_add_does_not_copy_ignored_files_when_disabled() {
     let repo = setup_git_repo();
-    
+
     // Explicitly disable copyignored (may be enabled globally)
     StdCommand::new("git")
         .args(["config", "grove.copyignored", "false"])
         .current_dir(repo.path())
         .output()
         .unwrap();
-    
+
     // Create .gitignore
     fs::write(repo.path().join(".gitignore"), ".env\n").unwrap();
-    StdCommand::new("git").args(["add", ".gitignore"]).current_dir(repo.path()).output().unwrap();
-    StdCommand::new("git").args(["commit", "-m", "add gitignore"]).current_dir(repo.path()).output().unwrap();
-    
+    StdCommand::new("git")
+        .args(["add", ".gitignore"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "add gitignore"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
     // Create ignored file
     fs::write(repo.path().join(".env"), "SECRET=123").unwrap();
-    
+
     // Create worktree - should NOT auto-copy ignored files
     grove()
         .args(["add", "feature"])
@@ -270,9 +298,13 @@ fn test_add_does_not_copy_ignored_files_when_disabled() {
         .assert()
         .success()
         .stderr(predicate::str::contains("Copying").not());
-    
+
     // Verify file was NOT copied
-    let output = grove().args(["path", "feature"]).current_dir(repo.path()).output().unwrap();
+    let output = grove()
+        .args(["path", "feature"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
     let wt_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert!(!std::path::Path::new(&wt_path).join(".env").exists());
 }
@@ -280,14 +312,14 @@ fn test_add_does_not_copy_ignored_files_when_disabled() {
 #[test]
 fn test_add_duplicate_fails() {
     let repo = setup_git_repo();
-    
+
     // Create first worktree
     grove()
         .args(["add", "feature-test"])
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     // Try to create duplicate
     grove()
         .args(["add", "feature-test"])
@@ -300,13 +332,13 @@ fn test_add_duplicate_fails() {
 #[test]
 fn test_add_shows_in_list() {
     let repo = setup_git_repo();
-    
+
     grove()
         .args(["add", "feature-test"])
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     grove()
         .arg("list")
         .current_dir(repo.path())
@@ -322,7 +354,7 @@ fn test_add_shows_in_list() {
 #[test]
 fn test_go_creates_if_not_exists() {
     let repo = setup_git_repo();
-    
+
     grove()
         .args(["go", "new-feature"])
         .current_dir(repo.path())
@@ -335,14 +367,14 @@ fn test_go_creates_if_not_exists() {
 #[test]
 fn test_go_existing_outputs_cd() {
     let repo = setup_git_repo();
-    
+
     // Create worktree
     grove()
         .args(["add", "feature-test"])
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     // Go to it
     grove()
         .args(["go", "feature-test"])
@@ -356,7 +388,7 @@ fn test_go_existing_outputs_cd() {
 #[test]
 fn test_go_shorthand() {
     let repo = setup_git_repo();
-    
+
     // grove <name> should work same as grove go <name>
     grove()
         .arg("new-feature")
@@ -374,14 +406,14 @@ fn test_go_shorthand() {
 #[test]
 fn test_rm_removes_worktree() {
     let repo = setup_git_repo();
-    
+
     // Create worktree
     grove()
         .args(["add", "to-remove"])
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     // Remove it
     grove()
         .args(["rm", "to-remove"])
@@ -389,7 +421,7 @@ fn test_rm_removes_worktree() {
         .assert()
         .success()
         .stderr(predicate::str::contains("Removed"));
-    
+
     // Verify not in list
     grove()
         .arg("list")
@@ -402,7 +434,7 @@ fn test_rm_removes_worktree() {
 #[test]
 fn test_rm_nonexistent_fails() {
     let repo = setup_git_repo();
-    
+
     grove()
         .args(["rm", "nonexistent"])
         .current_dir(repo.path())
@@ -414,19 +446,19 @@ fn test_rm_nonexistent_fails() {
 #[test]
 fn test_rm_deletes_branch() {
     let repo = setup_git_repo();
-    
+
     grove()
         .args(["add", "to-remove"])
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     grove()
         .args(["rm", "to-remove"])
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     // Verify branch is deleted
     let output = StdCommand::new("git")
         .args(["branch", "--list", "to-remove"])
@@ -446,13 +478,13 @@ fn test_rm_deletes_branch() {
 #[test]
 fn test_path_outputs_worktree_path() {
     let repo = setup_git_repo();
-    
+
     grove()
         .args(["add", "feature-test"])
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     grove()
         .args(["path", "feature-test"])
         .current_dir(repo.path())
@@ -464,7 +496,7 @@ fn test_path_outputs_worktree_path() {
 #[test]
 fn test_path_nonexistent_fails() {
     let repo = setup_git_repo();
-    
+
     grove()
         .args(["path", "nonexistent"])
         .current_dir(repo.path())
@@ -480,14 +512,14 @@ fn test_path_nonexistent_fails() {
 #[test]
 fn test_nested_worktree_sets_parent() {
     let repo = setup_git_repo();
-    
+
     // Create parent worktree
     grove()
         .args(["add", "parent-feature"])
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     // Get the worktree path
     let output = grove()
         .args(["path", "parent-feature"])
@@ -495,14 +527,14 @@ fn test_nested_worktree_sets_parent() {
         .output()
         .unwrap();
     let parent_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    
+
     // Create child worktree from inside parent
     grove()
         .args(["add", "child-task"])
         .current_dir(&parent_path)
         .assert()
         .success();
-    
+
     // List should show hierarchy (child indented under parent)
     grove()
         .arg("list")
@@ -520,28 +552,28 @@ fn test_nested_worktree_sets_parent() {
 #[test]
 fn test_context_aware_lookup_prefers_child() {
     let repo = setup_git_repo();
-    
+
     // Create two worktrees with same name but different parents
     grove()
         .args(["add", "parent-a"])
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     let output = grove()
         .args(["path", "parent-a"])
         .current_dir(repo.path())
         .output()
         .unwrap();
     let parent_a_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    
+
     // Create child "sub" under parent-a
     grove()
         .args(["add", "sub"])
         .current_dir(&parent_a_path)
         .assert()
         .success();
-    
+
     // From inside parent-a, "grove go sub" should find the child
     grove()
         .args(["go", "sub"])
@@ -552,13 +584,13 @@ fn test_context_aware_lookup_prefers_child() {
 }
 
 // =============================================================================
-// PRUNE COMMAND TESTS  
+// PRUNE COMMAND TESTS
 // =============================================================================
 
 #[test]
 fn test_prune_succeeds() {
     let repo = setup_git_repo();
-    
+
     grove()
         .arg("prune")
         .current_dir(repo.path())
@@ -574,13 +606,13 @@ fn test_prune_succeeds() {
 #[test]
 fn test_branch_with_slash() {
     let repo = setup_git_repo();
-    
+
     grove()
         .args(["add", "feature/auth"])
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     grove()
         .arg("list")
         .current_dir(repo.path())
@@ -592,13 +624,13 @@ fn test_branch_with_slash() {
 #[test]
 fn test_branch_with_special_chars() {
     let repo = setup_git_repo();
-    
+
     grove()
         .args(["add", "fix/JIRA-123_some-bug"])
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     grove()
         .arg("list")
         .current_dir(repo.path())
@@ -614,22 +646,38 @@ fn test_branch_with_special_chars() {
 #[test]
 fn test_pull_copies_ignored_files_from_main() {
     let repo = setup_git_repo();
-    
+
     // Create .gitignore
     fs::write(repo.path().join(".gitignore"), "*.log\n.env\n").unwrap();
-    StdCommand::new("git").args(["add", ".gitignore"]).current_dir(repo.path()).output().unwrap();
-    StdCommand::new("git").args(["commit", "-m", "add gitignore"]).current_dir(repo.path()).output().unwrap();
-    
+    StdCommand::new("git")
+        .args(["add", ".gitignore"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "add gitignore"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
     // Create ignored files in main
     fs::write(repo.path().join("app.log"), "log content").unwrap();
     fs::write(repo.path().join(".env"), "SECRET=123").unwrap();
-    
+
     // Create worktree
-    grove().args(["add", "feature"]).current_dir(repo.path()).assert().success();
-    
-    let output = grove().args(["path", "feature"]).current_dir(repo.path()).output().unwrap();
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let output = grove()
+        .args(["path", "feature"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
     let wt_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    
+
     // Pull ignored files
     grove()
         .arg("pull")
@@ -637,7 +685,7 @@ fn test_pull_copies_ignored_files_from_main() {
         .assert()
         .success()
         .stderr(predicate::str::contains("Pulled"));
-    
+
     // Verify files were copied
     assert!(std::path::Path::new(&wt_path).join("app.log").exists());
     assert!(std::path::Path::new(&wt_path).join(".env").exists());
@@ -646,29 +694,45 @@ fn test_pull_copies_ignored_files_from_main() {
 #[test]
 fn test_pull_with_specific_paths() {
     let repo = setup_git_repo();
-    
+
     // Create .gitignore
     fs::write(repo.path().join(".gitignore"), "*.log\n.env\n").unwrap();
-    StdCommand::new("git").args(["add", ".gitignore"]).current_dir(repo.path()).output().unwrap();
-    StdCommand::new("git").args(["commit", "-m", "add gitignore"]).current_dir(repo.path()).output().unwrap();
-    
+    StdCommand::new("git")
+        .args(["add", ".gitignore"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "add gitignore"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
     // Create worktree BEFORE creating ignored files (so nothing to auto-copy)
-    grove().args(["add", "feature"]).current_dir(repo.path()).assert().success();
-    
-    let output = grove().args(["path", "feature"]).current_dir(repo.path()).output().unwrap();
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let output = grove()
+        .args(["path", "feature"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
     let wt_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    
+
     // NOW create ignored files in main (after worktree exists)
     fs::write(repo.path().join("app.log"), "log").unwrap();
     fs::write(repo.path().join(".env"), "SECRET=123").unwrap();
-    
+
     // Pull only .env
     grove()
         .args(["pull", ".env"])
         .current_dir(&wt_path)
         .assert()
         .success();
-    
+
     // Only .env should be copied
     assert!(std::path::Path::new(&wt_path).join(".env").exists());
     assert!(!std::path::Path::new(&wt_path).join("app.log").exists());
@@ -677,21 +741,41 @@ fn test_pull_with_specific_paths() {
 #[test]
 fn test_push_copies_ignored_files_to_main() {
     let repo = setup_git_repo();
-    
+
     // Create .gitignore
     fs::write(repo.path().join(".gitignore"), "*.log\n").unwrap();
-    StdCommand::new("git").args(["add", ".gitignore"]).current_dir(repo.path()).output().unwrap();
-    StdCommand::new("git").args(["commit", "-m", "add gitignore"]).current_dir(repo.path()).output().unwrap();
-    
+    StdCommand::new("git")
+        .args(["add", ".gitignore"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "add gitignore"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
     // Create worktree
-    grove().args(["add", "feature"]).current_dir(repo.path()).assert().success();
-    
-    let output = grove().args(["path", "feature"]).current_dir(repo.path()).output().unwrap();
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let output = grove()
+        .args(["path", "feature"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
     let wt_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    
+
     // Create ignored file in worktree
-    fs::write(std::path::Path::new(&wt_path).join("debug.log"), "debug output").unwrap();
-    
+    fs::write(
+        std::path::Path::new(&wt_path).join("debug.log"),
+        "debug output",
+    )
+    .unwrap();
+
     // Push ignored files
     grove()
         .arg("push")
@@ -699,7 +783,7 @@ fn test_push_copies_ignored_files_to_main() {
         .assert()
         .success()
         .stderr(predicate::str::contains("Pushed"));
-    
+
     // Verify file was copied to main
     assert!(repo.path().join("debug.log").exists());
 }
@@ -707,7 +791,7 @@ fn test_push_copies_ignored_files_to_main() {
 #[test]
 fn test_pull_from_main_worktree_fails() {
     let repo = setup_git_repo();
-    
+
     // Pull from main should fail (nothing to pull from)
     grove()
         .arg("pull")
@@ -724,16 +808,22 @@ fn test_pull_from_main_worktree_fails() {
 #[test]
 fn test_sync_imports_existing_git_worktrees() {
     let repo = setup_git_repo();
-    
+
     // Create worktree directly with git (bypassing grove)
     let wt_path = repo.path().join(".git/wt/legacy");
     fs::create_dir_all(repo.path().join(".git/wt")).unwrap();
     StdCommand::new("git")
-        .args(["worktree", "add", wt_path.to_str().unwrap(), "-b", "legacy-branch"])
+        .args([
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "-b",
+            "legacy-branch",
+        ])
         .current_dir(repo.path())
         .output()
         .expect("Failed to create git worktree");
-    
+
     // Run sync
     grove()
         .arg("sync")
@@ -741,7 +831,7 @@ fn test_sync_imports_existing_git_worktrees() {
         .assert()
         .success()
         .stderr(predicate::str::contains("Synced").or(predicate::str::contains("imported")));
-    
+
     // Now grove should see it
     grove()
         .arg("list")
@@ -754,14 +844,14 @@ fn test_sync_imports_existing_git_worktrees() {
 #[test]
 fn test_sync_removes_stale_entries() {
     let repo = setup_git_repo();
-    
+
     // Create worktree with grove
     grove()
         .args(["add", "will-delete"])
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     // Remove it directly with git (bypassing grove)
     let output = grove()
         .args(["path", "will-delete"])
@@ -769,20 +859,20 @@ fn test_sync_removes_stale_entries() {
         .output()
         .unwrap();
     let wt_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    
+
     StdCommand::new("git")
         .args(["worktree", "remove", &wt_path])
         .current_dir(repo.path())
         .output()
         .expect("Failed to remove git worktree");
-    
+
     // Run sync to clean up stale entry
     grove()
         .arg("sync")
         .current_dir(repo.path())
         .assert()
         .success();
-    
+
     // Grove should no longer see it
     grove()
         .arg("list")

@@ -111,17 +111,18 @@ impl Cli {
             (None, None) |  // bare `grove` -> list
             (Some(Commands::List), _) |
             (Some(Commands::Ls), _) |
-            (Some(Commands::Go { name: None, .. }), _)  // interactive go
+            (Some(Commands::Go { name: None, .. }), _) // interactive go
         );
-        
-        if needs_orphan_check {
-            if commands::check_orphaned_worktree()? {
-                return Ok(()); // Already handled - cd'd to main repo
-            }
+
+        if needs_orphan_check && commands::check_orphaned_worktree()? {
+            return Ok(()); // Already handled - cd'd to main repo
         }
-        
+
         match &self.command {
-            Some(Commands::Go { name: Some(name), base }) => commands::go(name, base.as_deref()),
+            Some(Commands::Go {
+                name: Some(name),
+                base,
+            }) => commands::go(name, base.as_deref()),
             Some(Commands::Go { name: None, .. }) => commands::go_interactive(),
             Some(Commands::Add { name, base }) => commands::add(name, base.as_deref()),
             Some(Commands::Rm { name, force }) => commands::rm(name, *force),
