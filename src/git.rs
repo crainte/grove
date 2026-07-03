@@ -229,6 +229,46 @@ pub fn is_dirty(worktree_path: &Path) -> Result<bool> {
     Ok(!output.stdout.is_empty())
 }
 
+/// Get ahead/behind counts for a branch
+/// Returns (ahead, behind) relative to upstream or parent branch
+pub fn ahead_behind(worktree_path: &Path, branch: &str, compare_to: Option<&str>) -> Result<(u32, u32)> {
+    // First try upstream tracking branch
+    let upstream = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", &format!("{}@{{upstream}}", branch)])
+        .current_dir(worktree_path)
+        .output()
+        .context("Failed to get upstream")?;
+    
+    let compare_ref = if upstream.status.success() {
+        String::from_utf8_lossy(&upstream.stdout).trim().to_string()
+    } else if let Some(parent) = compare_to {
+        parent.to_string()
+    } else {
+        return Ok((0, 0)); // Nothing to compare to
+    };
+    
+    let output = Command::new("git")
+        .args(["rev-list", "--left-right", "--count", &format!("{}...{}", branch, compare_ref)])
+        .current_dir(worktree_path)
+        .output()
+        .context("Failed to get ahead/behind")?;
+    
+    if !output.status.success() {
+        return Ok((0, 0));
+    }
+    
+    let counts = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = counts.trim().split_whitespace().collect();
+    
+    if parts.len() == 2 {
+        let ahead = parts[0].parse().unwrap_or(0);
+        let behind = parts[1].parse().unwrap_or(0);
+        Ok((ahead, behind))
+    } else {
+        Ok((0, 0))
+    }
+}
+
 /// Get the wt directory for storing worktrees
 pub fn wt_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".git/wt")
