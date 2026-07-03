@@ -10,6 +10,19 @@ Grove is a rewrite of the bash `wt` function from `~/.config/dotfiles/worktree.s
 - **Planned Claude Code integration** — needs to be robust and predictable
 - **User preference** — distributable tooling
 
+## CRITICAL SAFETY RULES
+
+### NEVER force-remove dirty worktrees
+
+If a worktree shows dirty status (`!` modified or `?` untracked), **STOP and ask the user**. Do not use `--force` or force-remove. The dirty indicator exists to protect uncommitted work.
+
+This applies to:
+- `grove rm --force`
+- `git worktree remove --force`  
+- Any destructive operation on directories with uncommitted changes
+
+**Always ask first. Lost work cannot be recovered.**
+
 ## Key Problems Solved
 
 ### 1. Config Inheritance (mise.toml, .env)
