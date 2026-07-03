@@ -163,7 +163,8 @@ pub fn rm(name: &str, force: bool) -> Result<()> {
     let wt_path = meta.worktree_path(&id);
 
     // Check for uncommitted changes unless force
-    if !force && wt_path.exists() && git::is_dirty(&wt_path)? {
+    let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
+    if !force && wt_path.exists() && (modified || untracked) {
         bail!(
             "Worktree '{}' has uncommitted changes. Use --force to remove anyway.",
             name
@@ -232,39 +233,71 @@ pub fn list() -> Result<()> {
     let is_main_current = current_id.is_none();
     let main_is_last = top_level.is_empty() && orphans.is_empty();
     let main_has_children = false; // main worktree doesn't have children in our model
+
+    // Get status for main worktree
+    let (main_modified, main_untracked) =
+        git::worktree_status(&repo_root).unwrap_or((false, false));
+    let (main_ahead, main_behind) =
+        git::ahead_behind(&repo_root, &main_branch, None).unwrap_or((0, 0));
+    let main_status = WorktreeStatus {
+        has_modified: main_modified,
+        has_untracked: main_untracked,
+        ahead: main_ahead,
+        behind: main_behind,
+    };
+
     print_worktree_entry(
         &main_branch,
         &repo_root,
         is_main_current,
-        true,
         main_is_last,
         main_has_children,
         "",
         false,
+        &main_status,
     );
 
     // Print top-level worktrees
     let top_count = top_level.len();
     for (i, (id, info)) in top_level.iter().enumerate() {
-        let is_last = i == top_count - 1; // Orphans are separate section
+        let is_last = i == top_count - 1 && orphans.is_empty();
         let wt_path = meta.worktree_path(id);
         let is_current = current_id.as_deref() == Some(id.as_str());
         let has_children = !meta.children(id)?.is_empty();
+
+        // Get status
+        let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
+        let (ahead, behind) =
+            git::ahead_behind(&wt_path, &info.branch, Some(&main_branch)).unwrap_or((0, 0));
+        let status = WorktreeStatus {
+            has_modified: modified,
+            has_untracked: untracked,
+            ahead,
+            behind,
+        };
+
         print_worktree_entry(
             &info.branch,
             &wt_path,
             is_current,
-            false,
             is_last,
             has_children,
             "",
             false,
+            &status,
         );
 
         // Children are indented 3 spaces from parent's connector
         // Use │ continuation only if parent is not last sibling
         let child_prefix = if is_last { "   " } else { "│  " };
-        print_worktree_children(&meta, id, current_id.as_deref(), child_prefix, false)?;
+        print_worktree_children(
+            &meta,
+            id,
+            &info.branch,
+            current_id.as_deref(),
+            child_prefix,
+            false,
+        )?;
     }
 
     // Print orphaned worktrees (parent was deleted) - separate section
@@ -278,6 +311,16 @@ pub fn list() -> Result<()> {
         let is_current = current_id.as_deref() == Some(id.as_str());
         let has_children = !meta.children(id)?.is_empty();
 
+        // Orphans only compare to upstream (no parent to compare to)
+        let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
+        let (ahead, behind) = git::ahead_behind(&wt_path, &info.branch, None).unwrap_or((0, 0));
+        let status = WorktreeStatus {
+            has_modified: modified,
+            has_untracked: untracked,
+            ahead,
+            behind,
+        };
+
         // Indent based on depth (how deep in the tree they were)
         let orphan_prefix = "   ".repeat(depth.saturating_sub(1));
         print_orphan_entry(
@@ -287,11 +330,19 @@ pub fn list() -> Result<()> {
             is_last,
             has_children,
             &orphan_prefix,
+            &status,
         );
 
         // Children of orphans use normal tree display (3-char indent, matching regular tree)
         let child_prefix = format!("{}{}", orphan_prefix, if is_last { "   " } else { "│  " });
-        print_worktree_children(&meta, id, current_id.as_deref(), &child_prefix, true)?;
+        print_worktree_children(
+            &meta,
+            id,
+            &info.branch,
+            current_id.as_deref(),
+            &child_prefix,
+            true,
+        )?;
     }
 
     // Footer suggestion
@@ -304,44 +355,47 @@ pub fn list() -> Result<()> {
     Ok(())
 }
 
+/// Status information for a worktree
+struct WorktreeStatus {
+    has_modified: bool,
+    has_untracked: bool,
+    ahead: u32,
+    behind: u32,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn print_worktree_entry(
     name: &str,
     path: &std::path::Path,
     is_current: bool,
-    is_primary: bool,
     is_last: bool,
     has_children: bool,
     prefix: &str,
     is_orphan: bool,
+    status: &WorktreeStatus,
 ) {
     use colored::Colorize;
 
     let connector = if is_last { "└─" } else { "├─" };
-    // Path line has two continuation indicators:
-    // 1. Sibling continuation (3 chars): │ if not last, spaces if last
-    // 2. Child continuation (3 chars): │ if has children, spaces if not
     let path_prefix = match (is_last, has_children) {
-        (false, true) => "│  │  ",  // sibling + child continuation
-        (false, false) => "│     ", // sibling continuation only
-        (true, true) => "   │  ",   // child continuation only
-        (true, false) => "      ",  // no continuation
+        (false, true) => "│  │  ",
+        (false, false) => "│     ",
+        (true, true) => "   │  ",
+        (true, false) => "      ",
     };
 
-    // Colors: dimmer for orphans
+    // Tree line colors: dimmer for orphans
     let tree_color = if is_orphan {
         (120, 100, 140)
     } else {
         (180, 160, 200)
     };
 
-    // Marker: filled green if current, hollow green if primary, hollow dim otherwise
+    // Marker: ● green if current, ○ otherwise
     let marker = if is_current {
         "●".green().to_string()
-    } else if is_primary {
-        "○".green().to_string()
     } else if is_orphan {
-        "○".truecolor(150, 150, 150).to_string() // dimmer for orphans
+        "○".truecolor(150, 150, 150).to_string()
     } else {
         "○".bright_black().to_string()
     };
@@ -349,7 +403,7 @@ fn print_worktree_entry(
     let branch_name = if is_current {
         name.bold().cyan().to_string()
     } else if is_orphan {
-        name.truecolor(180, 180, 180).to_string() // dimmer for orphans
+        name.truecolor(180, 180, 180).to_string()
     } else {
         name.cyan().to_string()
     };
@@ -369,11 +423,40 @@ fn print_worktree_entry(
         here_suffix
     );
 
-    // Print path below
+    // Build status string: ↑N ↓M !? · path
+    let mut status_parts = Vec::new();
+    if status.ahead > 0 {
+        status_parts.push(format!("↑{}", status.ahead).green().to_string());
+    }
+    if status.behind > 0 {
+        status_parts.push(
+            format!("↓{}", status.behind)
+                .truecolor(255, 165, 0)
+                .to_string(),
+        ); // orange
+    }
+    // Dirty indicators: ! for modified (red), ? for untracked (cyan)
+    let dirty_str = match (status.has_modified, status.has_untracked) {
+        (true, true) => format!("{}{}", "!".red(), "?".cyan()),
+        (true, false) => "!".red().to_string(),
+        (false, true) => "?".cyan().to_string(),
+        (false, false) => String::new(),
+    };
+    if !dirty_str.is_empty() {
+        status_parts.push(dirty_str);
+    }
+
+    let status_str = if status_parts.is_empty() {
+        String::new()
+    } else {
+        format!("{} · ", status_parts.join(" "))
+    };
+
     eprintln!(
-        "{}{}{}",
+        "{}{}{}{}",
         prefix.truecolor(tree_color.0, tree_color.1, tree_color.2),
         path_prefix.truecolor(tree_color.0, tree_color.1, tree_color.2),
+        status_str,
         path.display().to_string().bright_black()
     );
 }
@@ -386,57 +469,25 @@ fn print_orphan_entry(
     is_last: bool,
     has_children: bool,
     prefix: &str,
+    status: &WorktreeStatus,
 ) {
-    use colored::Colorize;
-
-    // Use normal tree connectors (the ┊ separator already shows they're orphaned)
-    let connector = if is_last { "└─" } else { "├─" };
-    let path_prefix = match (is_last, has_children) {
-        (false, true) => "│  │  ",
-        (false, false) => "│     ",
-        (true, true) => "   │  ",
-        (true, false) => "      ",
-    };
-
-    let marker = if is_current {
-        "●".green().to_string()
-    } else {
-        "○".truecolor(150, 150, 150).to_string() // dimmer for orphans
-    };
-
-    let branch_name = if is_current {
-        name.bold().cyan().to_string()
-    } else {
-        name.truecolor(180, 180, 180).to_string() // dimmer for orphans
-    };
-
-    let here_suffix = if is_current {
-        " ← here".green().to_string()
-    } else {
-        String::new()
-    };
-
-    eprintln!(
-        "{}{} {} {}{}",
-        prefix.truecolor(120, 100, 140),    // color prefix too
-        connector.truecolor(120, 100, 140), // dimmer purple for orphans
-        marker,
-        branch_name,
-        here_suffix
-    );
-
-    // Print path below
-    eprintln!(
-        "{}{}{}",
-        prefix.truecolor(120, 100, 140), // color prefix too
-        path_prefix.truecolor(120, 100, 140),
-        path.display().to_string().bright_black()
+    // Reuse print_worktree_entry with is_orphan=true
+    print_worktree_entry(
+        name,
+        path,
+        is_current,
+        is_last,
+        has_children,
+        prefix,
+        true,
+        status,
     );
 }
 
 fn print_worktree_children(
     meta: &Meta,
     parent_id: &str,
+    parent_branch: &str,
     current_id: Option<&str>,
     prefix: &str,
     is_orphan: bool,
@@ -450,20 +501,38 @@ fn print_worktree_children(
         let wt_path = meta.worktree_path(child_id);
         let has_children = !meta.children(child_id)?.is_empty();
 
+        // Get status for this worktree
+        let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
+        let (ahead, behind) =
+            git::ahead_behind(&wt_path, &child_info.branch, Some(parent_branch)).unwrap_or((0, 0));
+        let status = WorktreeStatus {
+            has_modified: modified,
+            has_untracked: untracked,
+            ahead,
+            behind,
+        };
+
         print_worktree_entry(
             &child_info.branch,
             &wt_path,
             is_current,
-            false,
             is_last,
             has_children,
             prefix,
             is_orphan,
+            &status,
         );
 
         // Recurse for nested children - 3 char indent
         let next_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
-        print_worktree_children(meta, child_id, current_id, &next_prefix, is_orphan)?;
+        print_worktree_children(
+            meta,
+            child_id,
+            &child_info.branch,
+            current_id,
+            &next_prefix,
+            is_orphan,
+        )?;
     }
 
     Ok(())
@@ -528,7 +597,8 @@ pub fn clean(target_branch: Option<&str>) -> Result<()> {
             let wt_path = meta.worktree_path(&id);
 
             // Check for uncommitted changes
-            if wt_path.exists() && git::is_dirty(&wt_path)? {
+            let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
+            if wt_path.exists() && (modified || untracked) {
                 eprintln!(
                     "{}",
                     format!("⚠ Skipping '{}': has uncommitted changes", info.branch).yellow()
