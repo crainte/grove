@@ -163,7 +163,8 @@ pub fn rm(name: &str, force: bool) -> Result<()> {
     let wt_path = meta.worktree_path(&id);
 
     // Check for uncommitted changes unless force
-    if !force && wt_path.exists() && git::is_dirty(&wt_path)? {
+    let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
+    if !force && wt_path.exists() && (modified || untracked) {
         bail!(
             "Worktree '{}' has uncommitted changes. Use --force to remove anyway.",
             name
@@ -234,16 +235,20 @@ pub fn list() -> Result<()> {
     let main_has_children = false; // main worktree doesn't have children in our model
     
     // Get status for main worktree
-    let main_dirty = git::is_dirty(&repo_root).unwrap_or(false);
+    let (main_modified, main_untracked) = git::worktree_status(&repo_root).unwrap_or((false, false));
     let (main_ahead, main_behind) = git::ahead_behind(&repo_root, &main_branch, None)
         .unwrap_or((0, 0));
-    let main_status = WorktreeStatus { is_dirty: main_dirty, ahead: main_ahead, behind: main_behind };
+    let main_status = WorktreeStatus { 
+        has_modified: main_modified, 
+        has_untracked: main_untracked, 
+        ahead: main_ahead, 
+        behind: main_behind 
+    };
     
     print_worktree_entry(
         &main_branch,
         &repo_root,
         is_main_current,
-        true,
         main_is_last,
         main_has_children,
         "",
@@ -259,17 +264,16 @@ pub fn list() -> Result<()> {
         let is_current = current_id.as_deref() == Some(id.as_str());
         let has_children = !meta.children(id)?.is_empty();
         
-        // Get status - compare to main branch
-        let is_dirty = git::is_dirty(&wt_path).unwrap_or(false);
+        // Get status
+        let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
         let (ahead, behind) = git::ahead_behind(&wt_path, &info.branch, Some(&main_branch))
             .unwrap_or((0, 0));
-        let status = WorktreeStatus { is_dirty, ahead, behind };
+        let status = WorktreeStatus { has_modified: modified, has_untracked: untracked, ahead, behind };
         
         print_worktree_entry(
             &info.branch,
             &wt_path,
             is_current,
-            false,
             is_last,
             has_children,
             "",
@@ -295,10 +299,10 @@ pub fn list() -> Result<()> {
         let has_children = !meta.children(id)?.is_empty();
 
         // Orphans only compare to upstream (no parent to compare to)
-        let is_dirty = git::is_dirty(&wt_path).unwrap_or(false);
+        let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
         let (ahead, behind) = git::ahead_behind(&wt_path, &info.branch, None)
             .unwrap_or((0, 0));
-        let status = WorktreeStatus { is_dirty, ahead, behind };
+        let status = WorktreeStatus { has_modified: modified, has_untracked: untracked, ahead, behind };
 
         // Indent based on depth (how deep in the tree they were)
         let orphan_prefix = "   ".repeat(depth.saturating_sub(1));
@@ -329,7 +333,8 @@ pub fn list() -> Result<()> {
 
 /// Status information for a worktree
 struct WorktreeStatus {
-    is_dirty: bool,
+    has_modified: bool,
+    has_untracked: bool,
     ahead: u32,
     behind: u32,
 }
@@ -339,7 +344,6 @@ fn print_worktree_entry(
     name: &str,
     path: &std::path::Path,
     is_current: bool,
-    is_primary: bool,
     is_last: bool,
     has_children: bool,
     prefix: &str,
@@ -363,28 +367,11 @@ fn print_worktree_entry(
         (180, 160, 200)
     };
 
-    // Marker: ● if current, ○ if not
-    // Color: yellow if dirty, default otherwise
+    // Marker: ● green if current, ○ otherwise
     let marker = if is_current {
-        if status.is_dirty {
-            "●".yellow().to_string()
-        } else {
-            "●".to_string()
-        }
-    } else if is_primary {
-        if status.is_dirty {
-            "○".yellow().to_string()
-        } else {
-            "○".green().to_string()
-        }
+        "●".green().to_string()
     } else if is_orphan {
-        if status.is_dirty {
-            "○".yellow().to_string()
-        } else {
-            "○".truecolor(150, 150, 150).to_string()
-        }
-    } else if status.is_dirty {
-        "○".yellow().to_string()
+        "○".truecolor(150, 150, 150).to_string()
     } else {
         "○".bright_black().to_string()
     };
@@ -412,13 +399,23 @@ fn print_worktree_entry(
         here_suffix
     );
 
-    // Build status string: ↑N ↓M · path
+    // Build status string: ↑N ↓M !? · path
     let mut status_parts = Vec::new();
     if status.ahead > 0 {
         status_parts.push(format!("↑{}", status.ahead).green().to_string());
     }
     if status.behind > 0 {
         status_parts.push(format!("↓{}", status.behind).truecolor(255, 165, 0).to_string()); // orange
+    }
+    // Dirty indicators: ! for modified (red), ? for untracked (cyan)
+    let dirty_str = match (status.has_modified, status.has_untracked) {
+        (true, true) => format!("{}{}", "!".red(), "?".cyan()),
+        (true, false) => "!".red().to_string(),
+        (false, true) => "?".cyan().to_string(),
+        (false, false) => String::new(),
+    };
+    if !dirty_str.is_empty() {
+        status_parts.push(dirty_str);
     }
     
     let status_str = if status_parts.is_empty() {
@@ -451,7 +448,6 @@ fn print_orphan_entry(
         name,
         path,
         is_current,
-        false,
         is_last,
         has_children,
         prefix,
@@ -478,16 +474,15 @@ fn print_worktree_children(
         let has_children = !meta.children(child_id)?.is_empty();
 
         // Get status for this worktree
-        let is_dirty = git::is_dirty(&wt_path).unwrap_or(false);
+        let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
         let (ahead, behind) = git::ahead_behind(&wt_path, &child_info.branch, Some(parent_branch))
             .unwrap_or((0, 0));
-        let status = WorktreeStatus { is_dirty, ahead, behind };
+        let status = WorktreeStatus { has_modified: modified, has_untracked: untracked, ahead, behind };
 
         print_worktree_entry(
             &child_info.branch,
             &wt_path,
             is_current,
-            false,
             is_last,
             has_children,
             prefix,
@@ -562,7 +557,8 @@ pub fn clean(target_branch: Option<&str>) -> Result<()> {
             let wt_path = meta.worktree_path(&id);
 
             // Check for uncommitted changes
-            if wt_path.exists() && git::is_dirty(&wt_path)? {
+            let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
+            if wt_path.exists() && (modified || untracked) {
                 eprintln!(
                     "{}",
                     format!("⚠ Skipping '{}': has uncommitted changes", info.branch).yellow()

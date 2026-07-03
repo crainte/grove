@@ -214,8 +214,9 @@ pub fn worktree_prune(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Check if worktree has uncommitted changes
-pub fn is_dirty(worktree_path: &Path) -> Result<bool> {
+/// Check worktree status
+/// Returns (has_modified, has_untracked)
+pub fn worktree_status(worktree_path: &Path) -> Result<(bool, bool)> {
     let output = Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(worktree_path)
@@ -226,7 +227,18 @@ pub fn is_dirty(worktree_path: &Path) -> Result<bool> {
         bail!("git status failed");
     }
 
-    Ok(!output.stdout.is_empty())
+    let mut has_modified = false;
+    let mut has_untracked = false;
+    
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if line.starts_with("??") {
+            has_untracked = true;
+        } else if !line.is_empty() {
+            has_modified = true;
+        }
+    }
+    
+    Ok((has_modified, has_untracked))
 }
 
 /// Get ahead/behind counts for a branch
