@@ -229,7 +229,7 @@ pub fn worktree_status(worktree_path: &Path) -> Result<(bool, bool)> {
 
     let mut has_modified = false;
     let mut has_untracked = false;
-    
+
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         if line.starts_with("??") {
             has_untracked = true;
@@ -237,20 +237,28 @@ pub fn worktree_status(worktree_path: &Path) -> Result<(bool, bool)> {
             has_modified = true;
         }
     }
-    
+
     Ok((has_modified, has_untracked))
 }
 
 /// Get ahead/behind counts for a branch
 /// Returns (ahead, behind) relative to upstream or parent branch
-pub fn ahead_behind(worktree_path: &Path, branch: &str, compare_to: Option<&str>) -> Result<(u32, u32)> {
+pub fn ahead_behind(
+    worktree_path: &Path,
+    branch: &str,
+    compare_to: Option<&str>,
+) -> Result<(u32, u32)> {
     // First try upstream tracking branch
     let upstream = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", &format!("{}@{{upstream}}", branch)])
+        .args([
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{}@{{upstream}}", branch),
+        ])
         .current_dir(worktree_path)
         .output()
         .context("Failed to get upstream")?;
-    
+
     let compare_ref = if upstream.status.success() {
         String::from_utf8_lossy(&upstream.stdout).trim().to_string()
     } else if let Some(parent) = compare_to {
@@ -258,20 +266,25 @@ pub fn ahead_behind(worktree_path: &Path, branch: &str, compare_to: Option<&str>
     } else {
         return Ok((0, 0)); // Nothing to compare to
     };
-    
+
     let output = Command::new("git")
-        .args(["rev-list", "--left-right", "--count", &format!("{}...{}", branch, compare_ref)])
+        .args([
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{}...{}", branch, compare_ref),
+        ])
         .current_dir(worktree_path)
         .output()
         .context("Failed to get ahead/behind")?;
-    
+
     if !output.status.success() {
         return Ok((0, 0));
     }
-    
+
     let counts = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = counts.trim().split_whitespace().collect();
-    
+    let parts: Vec<&str> = counts.split_whitespace().collect();
+
     if parts.len() == 2 {
         let ahead = parts[0].parse().unwrap_or(0);
         let behind = parts[1].parse().unwrap_or(0);

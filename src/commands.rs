@@ -233,18 +233,19 @@ pub fn list() -> Result<()> {
     let is_main_current = current_id.is_none();
     let main_is_last = top_level.is_empty() && orphans.is_empty();
     let main_has_children = false; // main worktree doesn't have children in our model
-    
+
     // Get status for main worktree
-    let (main_modified, main_untracked) = git::worktree_status(&repo_root).unwrap_or((false, false));
-    let (main_ahead, main_behind) = git::ahead_behind(&repo_root, &main_branch, None)
-        .unwrap_or((0, 0));
-    let main_status = WorktreeStatus { 
-        has_modified: main_modified, 
-        has_untracked: main_untracked, 
-        ahead: main_ahead, 
-        behind: main_behind 
+    let (main_modified, main_untracked) =
+        git::worktree_status(&repo_root).unwrap_or((false, false));
+    let (main_ahead, main_behind) =
+        git::ahead_behind(&repo_root, &main_branch, None).unwrap_or((0, 0));
+    let main_status = WorktreeStatus {
+        has_modified: main_modified,
+        has_untracked: main_untracked,
+        ahead: main_ahead,
+        behind: main_behind,
     };
-    
+
     print_worktree_entry(
         &main_branch,
         &repo_root,
@@ -263,13 +264,18 @@ pub fn list() -> Result<()> {
         let wt_path = meta.worktree_path(id);
         let is_current = current_id.as_deref() == Some(id.as_str());
         let has_children = !meta.children(id)?.is_empty();
-        
+
         // Get status
         let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
-        let (ahead, behind) = git::ahead_behind(&wt_path, &info.branch, Some(&main_branch))
-            .unwrap_or((0, 0));
-        let status = WorktreeStatus { has_modified: modified, has_untracked: untracked, ahead, behind };
-        
+        let (ahead, behind) =
+            git::ahead_behind(&wt_path, &info.branch, Some(&main_branch)).unwrap_or((0, 0));
+        let status = WorktreeStatus {
+            has_modified: modified,
+            has_untracked: untracked,
+            ahead,
+            behind,
+        };
+
         print_worktree_entry(
             &info.branch,
             &wt_path,
@@ -284,7 +290,14 @@ pub fn list() -> Result<()> {
         // Children are indented 3 spaces from parent's connector
         // Use │ continuation only if parent is not last sibling
         let child_prefix = if is_last { "   " } else { "│  " };
-        print_worktree_children(&meta, id, &info.branch, current_id.as_deref(), child_prefix, false)?;
+        print_worktree_children(
+            &meta,
+            id,
+            &info.branch,
+            current_id.as_deref(),
+            child_prefix,
+            false,
+        )?;
     }
 
     // Print orphaned worktrees (parent was deleted) - separate section
@@ -300,9 +313,13 @@ pub fn list() -> Result<()> {
 
         // Orphans only compare to upstream (no parent to compare to)
         let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
-        let (ahead, behind) = git::ahead_behind(&wt_path, &info.branch, None)
-            .unwrap_or((0, 0));
-        let status = WorktreeStatus { has_modified: modified, has_untracked: untracked, ahead, behind };
+        let (ahead, behind) = git::ahead_behind(&wt_path, &info.branch, None).unwrap_or((0, 0));
+        let status = WorktreeStatus {
+            has_modified: modified,
+            has_untracked: untracked,
+            ahead,
+            behind,
+        };
 
         // Indent based on depth (how deep in the tree they were)
         let orphan_prefix = "   ".repeat(depth.saturating_sub(1));
@@ -318,7 +335,14 @@ pub fn list() -> Result<()> {
 
         // Children of orphans use normal tree display (3-char indent, matching regular tree)
         let child_prefix = format!("{}{}", orphan_prefix, if is_last { "   " } else { "│  " });
-        print_worktree_children(&meta, id, &info.branch, current_id.as_deref(), &child_prefix, true)?;
+        print_worktree_children(
+            &meta,
+            id,
+            &info.branch,
+            current_id.as_deref(),
+            &child_prefix,
+            true,
+        )?;
     }
 
     // Footer suggestion
@@ -405,7 +429,11 @@ fn print_worktree_entry(
         status_parts.push(format!("↑{}", status.ahead).green().to_string());
     }
     if status.behind > 0 {
-        status_parts.push(format!("↓{}", status.behind).truecolor(255, 165, 0).to_string()); // orange
+        status_parts.push(
+            format!("↓{}", status.behind)
+                .truecolor(255, 165, 0)
+                .to_string(),
+        ); // orange
     }
     // Dirty indicators: ! for modified (red), ? for untracked (cyan)
     let dirty_str = match (status.has_modified, status.has_untracked) {
@@ -417,7 +445,7 @@ fn print_worktree_entry(
     if !dirty_str.is_empty() {
         status_parts.push(dirty_str);
     }
-    
+
     let status_str = if status_parts.is_empty() {
         String::new()
     } else {
@@ -475,9 +503,14 @@ fn print_worktree_children(
 
         // Get status for this worktree
         let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
-        let (ahead, behind) = git::ahead_behind(&wt_path, &child_info.branch, Some(parent_branch))
-            .unwrap_or((0, 0));
-        let status = WorktreeStatus { has_modified: modified, has_untracked: untracked, ahead, behind };
+        let (ahead, behind) =
+            git::ahead_behind(&wt_path, &child_info.branch, Some(parent_branch)).unwrap_or((0, 0));
+        let status = WorktreeStatus {
+            has_modified: modified,
+            has_untracked: untracked,
+            ahead,
+            behind,
+        };
 
         print_worktree_entry(
             &child_info.branch,
@@ -492,7 +525,14 @@ fn print_worktree_children(
 
         // Recurse for nested children - 3 char indent
         let next_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
-        print_worktree_children(meta, child_id, &child_info.branch, current_id, &next_prefix, is_orphan)?;
+        print_worktree_children(
+            meta,
+            child_id,
+            &child_info.branch,
+            current_id,
+            &next_prefix,
+            is_orphan,
+        )?;
     }
 
     Ok(())
