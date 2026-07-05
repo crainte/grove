@@ -223,12 +223,8 @@ fn test_add_with_base_branch() {
 fn test_add_copies_ignored_files_when_enabled() {
     let repo = setup_git_repo();
 
-    // Enable copyignored
-    StdCommand::new("git")
-        .args(["config", "grove.copyignored", "true"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
+    // Enable copy via .grove.toml
+    fs::write(repo.path().join(".grove.toml"), "copy = [\".env\"]").unwrap();
 
     // Create .gitignore
     fs::write(repo.path().join(".gitignore"), ".env\n").unwrap();
@@ -268,12 +264,8 @@ fn test_add_copies_ignored_files_when_enabled() {
 fn test_add_does_not_copy_ignored_files_when_disabled() {
     let repo = setup_git_repo();
 
-    // Explicitly disable copyignored (may be enabled globally)
-    StdCommand::new("git")
-        .args(["config", "grove.copyignored", "false"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
+    // Explicitly disable copyignored via .grove.toml
+    fs::write(repo.path().join(".grove.toml"), "copyignored = false").unwrap();
 
     // Create .gitignore
     fs::write(repo.path().join(".gitignore"), ".env\n").unwrap();
@@ -397,6 +389,34 @@ fn test_go_shorthand() {
         .success()
         .stderr(predicate::str::contains("Creating worktree"))
         .stdout(predicate::str::contains("__grove_cd:"));
+}
+
+#[test]
+fn test_go_missing_directory_falls_back_to_default_branch() {
+    let repo = setup_git_repo();
+
+    // Create worktree
+    grove()
+        .args(["add", "will-vanish"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    // Manually delete the worktree directory (simulating external removal)
+    let wt_path = repo.path().join(".git/wt/1");
+    std::fs::remove_dir_all(&wt_path).unwrap();
+
+    // Try to go to it — should fallback to default branch with warning
+    grove()
+        .args(["go", "will-vanish"])
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("directory missing"))
+        .stderr(predicate::str::contains("switching to"))
+        // Should cd to repo root, not the missing wt path
+        .stdout(predicate::str::contains("__grove_cd:"))
+        .stdout(predicate::str::contains(repo.path().to_str().unwrap()));
 }
 
 // =============================================================================
@@ -880,4 +900,336 @@ fn test_sync_removes_stale_entries() {
         .assert()
         .success()
         .stderr(predicate::str::contains("will-delete").not());
+}
+
+// =============================================================================
+// CONFIG TESTS
+// =============================================================================
+
+#[test]
+fn test_config_copy_patterns() {
+    let dir = setup_git_repo();
+
+    // Create local config with copy patterns
+    fs::write(dir.path().join(".grove.toml"), "copy = [\"secret.env\"]").unwrap();
+
+    // Create a file that would be ignored
+    fs::write(dir.path().join(".gitignore"), "secret.env\n").unwrap();
+    fs::write(dir.path().join("secret.env"), "SECRET=value").unwrap();
+    StdCommand::new("git")
+        .args(["add", ".gitignore"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "Add gitignore"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    // Create worktree - should copy the matching ignored file
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Check that secret.env was copied
+    let wt_path = dir.path().join(".git/wt");
+    let entries: Vec<_> = fs::read_dir(&wt_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir() && e.file_name() != "grove.db")
+        .collect();
+    assert_eq!(entries.len(), 1);
+    let wt_dir = entries[0].path();
+    assert!(
+        wt_dir.join("secret.env").exists(),
+        "secret.env should be copied"
+    );
+}
+
+#[test]
+fn test_config_copy_glob_pattern() {
+    let dir = setup_git_repo();
+
+    // Create local config with glob pattern
+    fs::write(dir.path().join(".grove.toml"), "copy = [\".env*\"]").unwrap();
+
+    // Create files that would be ignored
+    fs::write(dir.path().join(".gitignore"), ".env*\n").unwrap();
+    fs::write(dir.path().join(".env"), "VAR=value").unwrap();
+    fs::write(dir.path().join(".env.local"), "LOCAL=value").unwrap();
+    StdCommand::new("git")
+        .args(["add", ".gitignore"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "Add gitignore"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    // Create worktree - should copy both .env files
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Check that both files were copied
+    let wt_path = dir.path().join(".git/wt");
+    let entries: Vec<_> = fs::read_dir(&wt_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir() && e.file_name() != "grove.db")
+        .collect();
+    assert_eq!(entries.len(), 1);
+    let wt_dir = entries[0].path();
+    assert!(wt_dir.join(".env").exists(), ".env should be copied");
+    assert!(
+        wt_dir.join(".env.local").exists(),
+        ".env.local should be copied"
+    );
+}
+
+#[test]
+fn test_config_copy_empty() {
+    let dir = setup_git_repo();
+
+    // No copy config
+
+    // Create a file that would be ignored
+    fs::write(dir.path().join(".gitignore"), "secret.env\n").unwrap();
+    fs::write(dir.path().join("secret.env"), "SECRET=value").unwrap();
+    StdCommand::new("git")
+        .args(["add", ".gitignore"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "Add gitignore"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    // Create worktree - should NOT copy ignored files (no copy config)
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Check that secret.env was NOT copied
+    let wt_path = dir.path().join(".git/wt");
+    let entries: Vec<_> = fs::read_dir(&wt_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir() && e.file_name() != "grove.db")
+        .collect();
+    assert_eq!(entries.len(), 1);
+    let wt_dir = entries[0].path();
+    assert!(
+        !wt_dir.join("secret.env").exists(),
+        "secret.env should NOT be copied without copy config"
+    );
+}
+
+// =============================================================================
+// HOOK TESTS
+// =============================================================================
+
+#[test]
+fn test_hook_post_create_runs() {
+    let dir = setup_git_repo();
+
+    // Create local config with a post-create hook that creates a marker file
+    let config = r#"
+[[hooks.post-create]]
+marker = "touch {{path}}/hook-ran.marker"
+"#;
+    fs::write(dir.path().join(".grove.toml"), config).unwrap();
+
+    // Create worktree
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Check that hook ran (marker file exists)
+    let wt_path = dir.path().join(".git/wt");
+    let entries: Vec<_> = fs::read_dir(&wt_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir() && e.file_name() != "grove.db")
+        .collect();
+    assert_eq!(entries.len(), 1);
+    let wt_dir = entries[0].path();
+    assert!(
+        wt_dir.join("hook-ran.marker").exists(),
+        "post-create hook should have run"
+    );
+}
+
+#[test]
+fn test_hook_template_variables() {
+    let dir = setup_git_repo();
+
+    // Create hook that writes all template variables to a file
+    let config = r#"
+[[hooks.post-create]]
+info = "echo 'path={{path}} branch={{branch}} id={{id}} repo={{repo}}' > {{path}}/vars.txt"
+"#;
+    fs::write(dir.path().join(".grove.toml"), config).unwrap();
+
+    // Create worktree
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Read the vars file and check contents
+    let wt_path = dir.path().join(".git/wt");
+    let entries: Vec<_> = fs::read_dir(&wt_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir() && e.file_name() != "grove.db")
+        .collect();
+    let wt_dir = entries[0].path();
+    let vars_content = fs::read_to_string(wt_dir.join("vars.txt")).unwrap();
+
+    assert!(
+        vars_content.contains("branch=feature"),
+        "should contain branch"
+    );
+    assert!(
+        vars_content.contains(&format!("path={}", wt_dir.display())),
+        "should contain path"
+    );
+    assert!(vars_content.contains("id="), "should contain id");
+    assert!(vars_content.contains("repo="), "should contain repo");
+}
+
+#[test]
+fn test_hook_blocks_run_sequentially() {
+    let dir = setup_git_repo();
+
+    // Create config with multiple blocks that write to a file in order
+    let config = r#"
+[[hooks.post-create]]
+first = "echo 'first' >> {{path}}/order.txt"
+
+[[hooks.post-create]]
+second = "echo 'second' >> {{path}}/order.txt"
+
+[[hooks.post-create]]
+third = "echo 'third' >> {{path}}/order.txt"
+"#;
+    fs::write(dir.path().join(".grove.toml"), config).unwrap();
+
+    // Create worktree
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Check order
+    let wt_path = dir.path().join(".git/wt");
+    let entries: Vec<_> = fs::read_dir(&wt_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir() && e.file_name() != "grove.db")
+        .collect();
+    let wt_dir = entries[0].path();
+    let order = fs::read_to_string(wt_dir.join("order.txt")).unwrap();
+
+    assert_eq!(
+        order.trim(),
+        "first\nsecond\nthird",
+        "blocks should run in order"
+    );
+}
+
+#[test]
+fn test_hook_tasks_in_block_run_parallel() {
+    let dir = setup_git_repo();
+
+    // Create config with multiple tasks in one block
+    // Each task sleeps then writes - if sequential, would take 2+ seconds
+    // If parallel, should complete in ~1 second
+    let config = r#"
+[[hooks.post-create]]
+task1 = "sleep 0.5 && echo 'task1' >> {{path}}/parallel.txt"
+task2 = "sleep 0.5 && echo 'task2' >> {{path}}/parallel.txt"
+"#;
+    fs::write(dir.path().join(".grove.toml"), config).unwrap();
+
+    let start = std::time::Instant::now();
+
+    // Create worktree
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let elapsed = start.elapsed();
+
+    // Should complete in under 1.5 seconds if parallel (0.5s tasks + overhead)
+    // Would take 2+ seconds if sequential
+    assert!(
+        elapsed.as_secs_f64() < 1.5,
+        "tasks should run in parallel, took {:?}",
+        elapsed
+    );
+
+    // Both tasks should have run
+    let wt_path = dir.path().join(".git/wt");
+    let entries: Vec<_> = fs::read_dir(&wt_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir() && e.file_name() != "grove.db")
+        .collect();
+    let wt_dir = entries[0].path();
+    let content = fs::read_to_string(wt_dir.join("parallel.txt")).unwrap();
+    assert!(content.contains("task1"), "task1 should have run");
+    assert!(content.contains("task2"), "task2 should have run");
+}
+
+#[test]
+fn test_hook_pre_remove_runs() {
+    let dir = setup_git_repo();
+
+    // Create worktree first
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Now create config with pre-remove hook
+    // Hook writes to main repo since worktree will be deleted
+    let config = r#"
+[[hooks.pre-remove]]
+backup = "echo 'removing {{branch}}' > {{repo}}/removed.log"
+"#;
+    fs::write(dir.path().join(".grove.toml"), config).unwrap();
+
+    // Remove worktree
+    grove()
+        .args(["rm", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Check hook ran
+    let log = fs::read_to_string(dir.path().join("removed.log")).unwrap();
+    assert!(
+        log.contains("removing feature"),
+        "pre-remove hook should have run"
+    );
 }

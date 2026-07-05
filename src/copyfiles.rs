@@ -27,6 +27,82 @@ pub fn list_ignored_files(worktree: &Path) -> Result<Vec<String>> {
     Ok(files)
 }
 
+/// List files matching glob patterns from ignored files in a worktree
+/// Patterns can be:
+/// - Exact filenames: ".env"
+/// - Glob patterns: ".env*", "*.log"
+/// - Directories: ".terraform/" (copies entire directory)
+pub fn list_matching_files(worktree: &Path, patterns: &[String]) -> Result<Vec<String>> {
+    if patterns.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Get all ignored files
+    let ignored = list_ignored_files(worktree)?;
+
+    // Filter by patterns
+    let matched: Vec<String> = ignored
+        .into_iter()
+        .filter(|file| {
+            patterns.iter().any(|pattern| {
+                let pattern = pattern.trim_end_matches('/');
+                // Directory pattern: matches files under that directory
+                if file.starts_with(&format!("{}/", pattern)) {
+                    return true;
+                }
+                // Glob pattern with *
+                if pattern.contains('*') {
+                    return glob_match(pattern, file);
+                }
+                // Exact match
+                file == pattern
+            })
+        })
+        .collect();
+
+    Ok(matched)
+}
+
+/// Simple glob matching (supports * wildcard)
+fn glob_match(pattern: &str, text: &str) -> bool {
+    // Split pattern by * and match parts
+    let parts: Vec<&str> = pattern.split('*').collect();
+
+    if parts.len() == 1 {
+        // No wildcard
+        return pattern == text;
+    }
+
+    let mut pos = 0;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+
+        if i == 0 {
+            // First part must match at start
+            if !text.starts_with(part) {
+                return false;
+            }
+            pos = part.len();
+        } else if i == parts.len() - 1 {
+            // Last part must match at end
+            if !text.ends_with(part) {
+                return false;
+            }
+        } else {
+            // Middle parts must exist somewhere after current position
+            if let Some(found) = text[pos..].find(part) {
+                pos += found + part.len();
+            } else {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
 /// Filter files by path prefixes
 pub fn filter_by_paths(files: Vec<String>, paths: &[String]) -> Vec<String> {
     if paths.is_empty() {

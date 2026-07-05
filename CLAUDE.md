@@ -68,9 +68,13 @@ grove/
 ├── src/
 │   ├── main.rs      # Entry point
 │   ├── cli.rs       # Clap command structure
-│   ├── commands.rs  # Command implementations (stubs)
-│   ├── meta.rs      # Metadata handling (implemented, tested)
+│   ├── commands.rs  # Command implementations
+│   ├── config.rs    # TOML config loading and hook execution
+│   ├── copyfiles.rs # Gitignored file sync
+│   ├── git.rs       # Git operations
+│   ├── meta.rs      # Metadata handling (SQLite)
 │   └── shell.rs     # Shell integration scripts
+├── .grove.toml      # Local config (optional)
 ├── SPEC.md          # Full specification
 ├── CLAUDE.md        # This file
 └── Cargo.toml
@@ -151,13 +155,59 @@ Base36 incrementing: `1`, `2`, ... `9`, `a`, `b`, ... `z`, `10`, ...
 
 ## Configuration
 
-Via git config:
-```bash
-git config grove.copyignored true           # Auto-copy gitignored files
-git config --add grove.hook "mise trust"    # Post-create hooks
+**BREAKING CHANGE**: Configuration moved from `git config` to TOML files.
+
+### Config Files
+
+- **Global**: `~/.config/grove/config.toml`
+- **Local**: `.grove.toml` in repo root
+
+Local config takes precedence over global.
+
+### Example Config
+
+```toml
+# .grove.toml
+
+# Copy these patterns when creating worktrees (from gitignored files)
+copy = [".env*", ".terraform/", ".mise.local.toml"]
+
+# Hooks: blocks run sequentially, tasks within a block run in parallel
+[[hooks.post-create]]
+trust = "mise trust {{path}}/mise.toml"
+deps = "npm ci"
+
+[[hooks.post-create]]
+build = "npm run build"
+types = "npm run types"
+
+[[hooks.pre-remove]]
+backup = "cp -r {{path}}/data {{repo}}/backup/"
 ```
 
-## Testing Strategy
+### Hook Types
+
+| Hook | When | Runs in | Use case |
+|------|------|---------|----------|
+| `post-create` | After worktree created, before cd | Current worktree | `mise trust`, copy files, deps |
+| `pre-remove` | Before worktree removed | Worktree being removed | Cleanup, backup |
+
+### Template Variables
+
+| Variable | Description |
+|----------|-------------|
+| `{{path}}` | New worktree path |
+| `{{branch}}` | Branch name |
+| `{{id}}` | Worktree ID |
+| `{{repo}}` | Repository root path |
+## Testing Strategy (TDD Required)
+
+**Always use Test-Driven Development:**
+1. **Red** — Write failing test first in `tests/integration.rs`
+2. **Green** — Implement minimum code to pass
+3. **Refactor** — Clean up while tests stay green
+
+Never implement features before writing tests.
 
 - **Unit tests**: In each module (`meta.rs` has them)
 - **Integration tests**: Use `tempfile` + `assert_cmd` for full workflows
