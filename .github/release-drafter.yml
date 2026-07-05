@@ -1,10 +1,30 @@
 name-template: 'v$RESOLVED_VERSION'
 tag-template: 'v$RESOLVED_VERSION'
+
+autolabeler:
+  - label: 'feature'
+    title:
+      - '/^feat(\(.+\))?:/'
+  - label: 'fix'
+    title:
+      - '/^fix(\(.+\))?:/'
+  - label: 'chore'
+    title:
+      - '/^(chore|ci|docs|style|refactor|test|build)(\(.+\))?:/'
+
+categories:
+  - title: '🚀 Features'
+    labels: ['feature']
+  - title: '🐛 Bug Fixes'
+    labels: ['fix']
+  - title: '🧹 Maintenance'
+    labels: ['chore']
+
+change-template: '- $TITLE (#$NUMBER)'
+
 template: |
   ## What's Changed
 
   $CHANGES
 
   **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
-version-resolver:
-  default: patch
