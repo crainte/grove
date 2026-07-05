@@ -651,7 +651,9 @@ pub fn clean(target_branch: Option<&str>) -> Result<()> {
             if wt_path.exists() {
                 git::worktree_remove(&repo_root, &wt_path, false)?;
             }
-            git::branch_delete(&repo_root, &info.branch, false)?;
+            // Force delete: we've verified the branch is merged via tree comparison,
+            // but git -d doesn't recognize squash merges as merged
+            git::branch_delete(&repo_root, &info.branch, true)?;
             meta.remove(&id)?;
             removed += 1;
         }

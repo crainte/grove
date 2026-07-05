@@ -1233,3 +1233,182 @@ backup = "echo 'removing {{branch}}' > {{repo}}/removed.log"
         "pre-remove hook should have run"
     );
 }
+
+// =============================================================================
+// CLEAN COMMAND TESTS
+// =============================================================================
+
+#[test]
+fn test_clean_removes_merged_worktree() {
+    let dir = setup_git_repo();
+
+    // Create and add worktree
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Make a commit on the feature branch
+    let wt_path = dir.path().join(".git/wt/1");
+    fs::write(wt_path.join("feature.txt"), "feature work").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "feature commit"])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+
+    // Merge into main (regular merge)
+    StdCommand::new("git")
+        .args(["merge", "feature"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    // Clean should remove merged worktree
+    grove()
+        .args(["clean"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "Removing merged worktree 'feature'",
+        ));
+
+    // Worktree should be gone
+    assert!(!wt_path.exists());
+}
+
+#[test]
+fn test_clean_detects_squash_merge() {
+    let dir = setup_git_repo();
+
+    // Create and add worktree
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Make commits on the feature branch
+    let wt_path = dir.path().join(".git/wt/1");
+    fs::write(wt_path.join("feature.txt"), "feature work").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "feature commit 1"])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+    fs::write(wt_path.join("feature2.txt"), "more work").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "feature commit 2"])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+
+    // Squash merge into main (simulates GitHub squash merge)
+    StdCommand::new("git")
+        .args(["merge", "--squash", "feature"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "feat: feature (#1)"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    // Clean should detect squash-merged branch and remove it
+    grove()
+        .args(["clean"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "Removing merged worktree 'feature'",
+        ));
+
+    // Worktree should be gone
+    assert!(!wt_path.exists());
+}
+
+#[test]
+fn test_clean_skips_dirty_worktree() {
+    let dir = setup_git_repo();
+
+    // Create and add worktree
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let wt_path = dir.path().join(".git/wt/1");
+
+    // Make uncommitted changes (dirty)
+    fs::write(wt_path.join("dirty.txt"), "uncommitted").unwrap();
+
+    // Clean should skip dirty worktree even though it has no commits (would be "merged")
+    grove()
+        .args(["clean"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "Skipping 'feature': has uncommitted changes",
+        ));
+
+    // Worktree should still exist
+    assert!(wt_path.exists());
+}
+
+#[test]
+fn test_clean_skips_unmerged_worktree() {
+    let dir = setup_git_repo();
+
+    // Create and add worktree
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Make a commit on the feature branch (but don't merge)
+    let wt_path = dir.path().join(".git/wt/1");
+    fs::write(wt_path.join("feature.txt"), "feature work").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "feature commit"])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+
+    // Clean should not touch unmerged worktree
+    grove()
+        .args(["clean"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("No merged worktrees to clean"));
+
+    // Worktree should still exist
+    assert!(wt_path.exists());
+}

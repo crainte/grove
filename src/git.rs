@@ -162,24 +162,43 @@ pub fn branch_delete(repo_root: &Path, branch: &str, force: bool) -> Result<()> 
     Ok(())
 }
 
-/// Check if a branch is merged into another branch
-/// Uses `git cherry` which works for squash merges too - if there are no
-/// unpicked commits (no lines starting with '+'), the branch is considered merged
+/// Check if a branch is merged into another branch.
+/// Works for all merge strategies: fast-forward, merge commit, squash, and rebase.
+/// Compares what merging would produce vs current target tree.
 pub fn is_branch_merged(repo_root: &Path, branch: &str, into: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["cherry", into, branch])
+    // Compute what tree merging branch into target would produce
+    let merge_tree = Command::new("git")
+        .args(["merge-tree", "--write-tree", into, branch])
         .current_dir(repo_root)
         .output()
-        .context("Failed to execute git cherry")?;
+        .context("Failed to execute git merge-tree")?;
 
-    if !output.status.success() {
-        // Branch might not exist or other error - treat as not merged
+    if !merge_tree.status.success() {
+        // Merge conflict or branch doesn't exist — not cleanly merged
         return Ok(false);
     }
 
-    // If there are no '+' lines, all commits are already in the target branch
-    let output_str = String::from_utf8_lossy(&output.stdout);
-    Ok(!output_str.lines().any(|line| line.starts_with('+')))
+    let merge_result = String::from_utf8_lossy(&merge_tree.stdout)
+        .trim()
+        .to_string();
+
+    // Get target's current tree
+    let target_tree = Command::new("git")
+        .args(["rev-parse", &format!("{}^{{tree}}", into)])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to execute git rev-parse")?;
+
+    if !target_tree.status.success() {
+        return Ok(false);
+    }
+
+    let target_result = String::from_utf8_lossy(&target_tree.stdout)
+        .trim()
+        .to_string();
+
+    // If merging would produce the same tree as target, branch is already merged
+    Ok(merge_result == target_result)
 }
 
 /// Pull latest changes
