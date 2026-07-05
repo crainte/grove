@@ -18,10 +18,20 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
-      - name: Get version from Cargo.toml
+      - name: Check if version changed
         id: version
-        run: echo "version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*\"\(.*\)\"/\1/')" >> $GITHUB_OUTPUT
+        run: |
+          NEW=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if git diff HEAD^ --name-only 2>/dev/null | grep -q '^Cargo.toml$'; then
+            OLD=$(git show HEAD^:Cargo.toml 2>/dev/null | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/' || echo "")
+            if [ "$NEW" != "$OLD" ]; then
+              echo "version=$NEW" >> $GITHUB_OUTPUT
+              echo "Version changed: $OLD -> $NEW"
+            fi
+          fi
 
       - uses: release-drafter/release-drafter@v6
         with:
