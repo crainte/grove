@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use std::env;
 use std::path::{Path, PathBuf};
 
+use crate::config::{Config, HookContext, run_hooks};
 use crate::git;
 use crate::meta::Meta;
 use crate::shell;
@@ -98,9 +99,21 @@ pub fn go(name: &str, base: Option<&str>) -> Result<()> {
     // Try to find existing worktree
     if let Some(id) = meta.find_by_branch_with_context(name, current_id.as_deref())? {
         let wt_path = meta.worktree_path(&id);
-        eprintln!("{} 📂 Switched to worktree '{}'", "✓".green(), name.cyan());
-        eprintln!("  {}", wt_path.display().to_string().dimmed());
-        shell::output_cd(&wt_path);
+        if wt_path.exists() {
+            eprintln!("{} 📂 Switched to worktree '{}'", "✓".green(), name.cyan());
+            eprintln!("  {}", wt_path.display().to_string().dimmed());
+            shell::output_cd(&wt_path);
+            return Ok(());
+        }
+        // Worktree directory missing — fallback to default branch
+        eprintln!(
+            "{} Worktree '{}' directory missing, switching to '{}'",
+            "⚠".yellow(),
+            name.yellow(),
+            main_branch.cyan()
+        );
+        eprintln!("  {}", repo_root.display().to_string().dimmed());
+        shell::output_cd(&repo_root);
         return Ok(());
     }
 
@@ -115,8 +128,10 @@ pub fn go(name: &str, base: Option<&str>) -> Result<()> {
     let id = create_worktree(&repo_root, &meta, name, base, parent_id)?;
     let wt_path = meta.worktree_path(&id);
 
+    // Run enter hooks after create (create already ran post-create)
     eprintln!("{} 📂 Created worktree '{}'", "✓".green(), name.cyan());
     eprintln!("  {}", wt_path.display().to_string().dimmed());
+
     shell::output_cd(&wt_path);
     Ok(())
 }
@@ -154,6 +169,7 @@ pub fn rm(name: &str, force: bool) -> Result<()> {
 
     let repo_root = git::find_repo_root()?;
     let meta = Meta::open(&repo_root)?;
+    let config = Config::load(&repo_root)?;
 
     // Find the worktree
     let id = meta
@@ -169,6 +185,20 @@ pub fn rm(name: &str, force: bool) -> Result<()> {
             "Worktree '{}' has uncommitted changes. Use --force to remove anyway.",
             name
         );
+    }
+
+    // Build hook context
+    let hook_ctx = HookContext {
+        path: &wt_path,
+        branch: name,
+        id: &id,
+        repo: &repo_root,
+    };
+
+    // Run pre-remove hooks (can abort)
+    if !config.hooks.pre_remove.is_empty() {
+        eprintln!("  {}", "Running pre-remove hooks...".dimmed());
+        run_hooks(&config.hooks.pre_remove, &hook_ctx)?;
     }
 
     eprintln!(
@@ -768,6 +798,11 @@ fn create_worktree(
     base: Option<&str>,
     parent_id: Option<&str>,
 ) -> Result<String> {
+    use colored::Colorize;
+
+    // Load config
+    let config = Config::load(repo_root)?;
+
     // Determine base branch
     let base_branch = match base {
         Some(b) => b.to_string(),
@@ -786,8 +821,15 @@ fn create_worktree(
     let id = meta.add_worktree(branch, parent_id)?;
     let wt_path = meta.worktree_path(&id);
 
+    // Build hook context (path doesn't exist yet for pre-create)
+    let hook_ctx = HookContext {
+        path: &wt_path,
+        branch,
+        id: &id,
+        repo: repo_root,
+    };
+
     // Create the git worktree
-    use colored::Colorize;
     eprintln!(
         "{}",
         format!("🌱 Creating worktree '{}'...", branch.cyan().bold()).yellow()
@@ -800,26 +842,27 @@ fn create_worktree(
         return Err(e);
     }
 
-    // Copy ignored files from main worktree (if enabled)
-    if git::copyignored_enabled(repo_root) {
-        use colored::Colorize;
-        let ignored = crate::copyfiles::list_ignored_files(repo_root)?;
-        if !ignored.is_empty() {
-            // Show what we're copying
-            let summary = summarize_files(&ignored);
-            eprintln!(
-                "  {}",
-                format!("Copying {} ignored files...", ignored.len()).dimmed()
-            );
+    // Copy files matching patterns from config
+    if !config.copy.is_empty() {
+        let files = crate::copyfiles::list_matching_files(repo_root, &config.copy)?;
+        if !files.is_empty() {
+            let summary = summarize_files(&files);
+            eprintln!("  {}", format!("Copying {} files...", files.len()).dimmed());
             for line in &summary {
                 eprintln!("    {}", line.dimmed());
             }
 
-            let copied = crate::copyfiles::copy_files_parallel(&ignored, repo_root, &wt_path)?;
+            let copied = crate::copyfiles::copy_files_parallel(&files, repo_root, &wt_path)?;
             if copied > 0 {
                 eprintln!("  {}", format!("✓ Copied {} files", copied).dimmed());
             }
         }
+    }
+
+    // Run post-create hooks
+    if !config.hooks.post_create.is_empty() {
+        eprintln!("  {}", "Running post-create hooks...".dimmed());
+        run_hooks(&config.hooks.post_create, &hook_ctx)?;
     }
 
     eprintln!("{}", "✓ 🌳 Worktree created!".green());

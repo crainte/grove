@@ -78,6 +78,44 @@ g ../other-feature      # go up and create sibling
 
 Context-aware lookup finds children first - `g sub-task` from within `feature/auth` finds the child before any top-level `sub-task`.
 
+## Configuration
+
+Grove uses TOML config files:
+
+- **Global**: `~/.config/grove/config.toml`
+- **Local**: `.grove.toml` in repo root (takes precedence)
+
+```toml
+# .grove.toml
+copyignored = true  # auto-copy .gitignored files to new worktrees
+
+# Hooks - blocks run sequentially, tasks within a block run in parallel
+[[hook.post-create]]
+trust = "mise trust {{path}}"
+
+[[hook.post-enter]]
+deps = "npm ci"
+server = "npm run dev"
+```
+
+### Hook Types
+
+| Hook | When |
+|------|------|
+| `pre-create` | Before worktree created (can abort) |
+| `post-create` | After created, before cd |
+| `pre-enter` | Before switching to worktree (can abort) |
+| `post-enter` | After switching |
+| `pre-remove` | Before removal (can abort) |
+| `post-remove` | After removal |
+
+### Template Variables
+
+- `{{path}}` - worktree path
+- `{{branch}}` - branch name  
+- `{{id}}` - worktree ID
+- `{{repo}}` - repo root path
+
 ## Storage Layout
 
 Worktrees live in `.git/wt/` with short IDs, keeping them inside your repo tree so config files are inherited:
@@ -86,9 +124,10 @@ Worktrees live in `.git/wt/` with short IDs, keeping them inside your repo tree 
 repo/
 ├── .git/
 │   └── wt/
-│       ├── meta.json    # worktree metadata
+│       ├── grove.db     # worktree metadata
 │       ├── a1/          # feature/auth
 │       └── b2/          # sub-task (child of a1)
+├── .grove.toml          # local config
 ├── .mise.toml           # inherited by all worktrees
 └── src/
 ```

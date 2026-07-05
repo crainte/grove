@@ -299,31 +299,6 @@ pub fn wt_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".git/wt")
 }
 
-/// Get a grove config value from git config
-pub fn grove_config(repo_root: &Path, key: &str) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .args(["config", "--get", &format!("grove.{}", key)])
-        .current_dir(repo_root)
-        .output()
-        .context("Failed to execute git config")?;
-
-    if output.status.success() {
-        let value = String::from_utf8(output.stdout)?.trim().to_string();
-        Ok(Some(value))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Check if grove.copyignored is enabled
-pub fn copyignored_enabled(repo_root: &Path) -> bool {
-    grove_config(repo_root, "copyignored")
-        .ok()
-        .flatten()
-        .map(|v| v == "true" || v == "1" || v == "yes")
-        .unwrap_or(false)
-}
-
 /// Info about a git worktree
 #[derive(Debug)]
 pub struct GitWorktree {
@@ -400,7 +375,16 @@ pub fn fzf_select(choices: &[String], prompt: &str) -> Result<Option<String>> {
     use std::process::Stdio;
 
     let mut child = Command::new("fzf")
-        .args(["--prompt", prompt, "--height", "40%", "--reverse"])
+        .args([
+            "--prompt", prompt,
+            "--height", "40%",
+            "--reverse",
+            "--border", "rounded",
+            "--border-label", " 🌳 Grove ",
+            "--color", "fg:-1,bg:-1,hl:cyan,fg+:white,bg+:-1,hl+:cyan:bold,info:yellow,prompt:green,pointer:magenta,marker:magenta,border:dim",
+            "--pointer", "▶",
+            "--marker", "●",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

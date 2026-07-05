@@ -1,12 +1,22 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{ColorChoice, Parser, Subcommand, builder::styling};
 
 use crate::commands;
 
+// Custom styles for help output
+const STYLES: styling::Styles = styling::Styles::styled()
+    .header(styling::AnsiColor::Green.on_default().bold())
+    .usage(styling::AnsiColor::Green.on_default().bold())
+    .literal(styling::AnsiColor::Cyan.on_default().bold())
+    .placeholder(styling::AnsiColor::Cyan.on_default());
+
 #[derive(Parser)]
 #[command(name = "grove")]
-#[command(about = "A fast, simple git worktree manager")]
+#[command(about = "🌳 A fast, simple git worktree manager")]
 #[command(version)]
+#[command(color = ColorChoice::Auto)]
+#[command(styles = STYLES)]
+#[command(after_help = "Run 'grove <command> --help' for more info on a command.")]
 pub struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -23,6 +33,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Go to worktree (create if needed, or fzf select if no name)
+    #[command(visible_alias = "cd")]
     Go {
         #[arg(value_name = "NAME")]
         name: Option<String>,
@@ -38,17 +49,16 @@ enum Commands {
     },
 
     /// Remove worktree
-    Rm {
+    #[command(visible_alias = "rm")]
+    Remove {
         name: String,
         #[arg(short, long)]
         force: bool,
     },
 
     /// List worktrees
+    #[command(visible_alias = "ls")]
     List,
-
-    /// List worktrees (alias)
-    Ls,
 
     /// Clean stale worktree references
     Prune,
@@ -110,7 +120,6 @@ impl Cli {
             (&self.command, &self.name),
             (None, None) |  // bare `grove` -> list
             (Some(Commands::List), _) |
-            (Some(Commands::Ls), _) |
             (Some(Commands::Go { name: None, .. }), _) // interactive go
         );
 
@@ -125,8 +134,8 @@ impl Cli {
             }) => commands::go(name, base.as_deref()),
             Some(Commands::Go { name: None, .. }) => commands::go_interactive(),
             Some(Commands::Add { name, base }) => commands::add(name, base.as_deref()),
-            Some(Commands::Rm { name, force }) => commands::rm(name, *force),
-            Some(Commands::List) | Some(Commands::Ls) => commands::list(),
+            Some(Commands::Remove { name, force }) => commands::rm(name, *force),
+            Some(Commands::List) => commands::list(),
             Some(Commands::Prune) => commands::prune(),
             Some(Commands::Sync) => commands::sync(),
             Some(Commands::Clean { branch }) => commands::clean(branch.as_deref()),
