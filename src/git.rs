@@ -156,6 +156,14 @@ pub fn branch_delete(repo_root: &Path, branch: &str, force: bool) -> Result<()> 
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // Friendlier message for "not fully merged" error
+        if stderr.contains("not fully merged") {
+            bail!(
+                "Branch '{}' not fully merged. Use 'grove rm --force {}' to remove anyway.",
+                branch,
+                branch
+            );
+        }
         bail!("git branch delete failed: {}", stderr.trim());
     }
 
