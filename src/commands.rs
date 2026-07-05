@@ -206,7 +206,7 @@ pub fn rm(name: &str, force: bool) -> Result<()> {
         format!("🗑️  Removing worktree '{}'...", name.cyan().bold()).yellow()
     );
 
-    // Remove git worktree
+    // Remove git worktree first (branch can't be deleted while worktree exists)
     if wt_path.exists() {
         git::worktree_remove(&repo_root, &wt_path, force)?;
     }
@@ -274,6 +274,7 @@ pub fn list() -> Result<()> {
         has_untracked: main_untracked,
         ahead: main_ahead,
         behind: main_behind,
+        dir_exists: true, // main repo always exists
     };
 
     print_worktree_entry(
@@ -304,6 +305,7 @@ pub fn list() -> Result<()> {
             has_untracked: untracked,
             ahead,
             behind,
+            dir_exists: wt_path.exists(),
         };
 
         print_worktree_entry(
@@ -349,6 +351,7 @@ pub fn list() -> Result<()> {
             has_untracked: untracked,
             ahead,
             behind,
+            dir_exists: wt_path.exists(),
         };
 
         // Indent based on depth (how deep in the tree they were)
@@ -391,6 +394,7 @@ struct WorktreeStatus {
     has_untracked: bool,
     ahead: u32,
     behind: u32,
+    dir_exists: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -421,8 +425,10 @@ fn print_worktree_entry(
         (180, 160, 200)
     };
 
-    // Marker: ● green if current, ○ otherwise
-    let marker = if is_current {
+    // Marker: ● green if current, ✗ red if dir missing, ○ otherwise
+    let marker = if !status.dir_exists {
+        "✗".red().to_string()
+    } else if is_current {
         "●".green().to_string()
     } else if is_orphan {
         "○".truecolor(150, 150, 150).to_string()
@@ -540,6 +546,7 @@ fn print_worktree_children(
             has_untracked: untracked,
             ahead,
             behind,
+            dir_exists: wt_path.exists(),
         };
 
         print_worktree_entry(
