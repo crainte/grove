@@ -178,6 +178,13 @@ pub fn rm(name: &str, force: bool) -> Result<()> {
 
     let wt_path = meta.worktree_path(&id);
 
+    // Check if we're inside the worktree we're about to remove
+    let cwd = std::env::current_dir().ok();
+    let removing_current = cwd
+        .as_ref()
+        .map(|c| c.starts_with(&wt_path))
+        .unwrap_or(false);
+
     // Check for uncommitted changes unless force
     let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
     if !force && wt_path.exists() && (modified || untracked) {
@@ -223,6 +230,12 @@ pub fn rm(name: &str, force: bool) -> Result<()> {
         "{}",
         format!("✓ Removed worktree '{}'", name.cyan()).green()
     );
+
+    // If we were inside the removed worktree, cd to main repo
+    if removing_current {
+        shell::output_cd(&repo_root);
+    }
+
     Ok(())
 }
 

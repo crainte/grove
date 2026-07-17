@@ -491,6 +491,28 @@ fn test_rm_deletes_branch() {
     );
 }
 
+#[test]
+fn test_rm_current_worktree_outputs_cd_to_main() {
+    let repo = setup_git_repo();
+
+    // Create worktree
+    grove()
+        .args(["add", "current-wt"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let wt_path = repo.path().join(".git/wt/1");
+
+    // Remove while "inside" that worktree - should output __grove_cd: to main repo
+    grove()
+        .args(["rm", "current-wt"])
+        .current_dir(&wt_path)
+        .assert()
+        .success()
+        .stdout(predicates::str::starts_with("__grove_cd:"));
+}
+
 // =============================================================================
 // PATH COMMAND TESTS
 // =============================================================================
