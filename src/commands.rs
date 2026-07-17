@@ -629,8 +629,12 @@ pub fn clean(target_branch: Option<&str>) -> Result<()> {
     let mut skipped = 0;
 
     for (id, info) in meta.all()? {
+        // Determine target: use branch's upstream if available, otherwise fall back to target
+        let check_against =
+            git::upstream_branch(&repo_root, &info.branch).unwrap_or_else(|| target.to_string());
+
         // Check if branch is merged
-        if git::is_branch_merged(&repo_root, &info.branch, target)? {
+        if git::is_branch_merged(&repo_root, &info.branch, &check_against)? {
             let wt_path = meta.worktree_path(&id);
 
             // Check for uncommitted changes
@@ -652,7 +656,11 @@ pub fn clean(target_branch: Option<&str>) -> Result<()> {
             // Remove the worktree
             eprintln!(
                 "{}",
-                format!("✓ Removing merged worktree '{}'", info.branch).green()
+                format!(
+                    "✓ Removing '{}' (merged into {})",
+                    info.branch, check_against
+                )
+                .green()
             );
 
             if wt_path.exists() {
@@ -697,6 +705,10 @@ pub fn done() -> Result<()> {
     use colored::Colorize;
 
     let repo_root = git::find_repo_root()?;
+
+    // Fetch all remotes (updates tracking branches for merge detection)
+    eprintln!("{}", "⟳ Fetching all remotes...".cyan());
+    git::fetch_all(&repo_root)?;
 
     // Pull latest on main
     eprintln!("{}", "⟳ Pulling latest...".cyan());

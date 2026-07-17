@@ -1098,7 +1098,7 @@ info = "echo 'path={{path}} branch={{branch}} id={{id}} repo={{repo}}' > {{path}
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir() && e.file_name() != "grove.db")
         .collect();
-    let wt_dir = entries[0].path();
+    let wt_dir = entries[0].path().canonicalize().unwrap();
     let vars_content = fs::read_to_string(wt_dir.join("vars.txt")).unwrap();
 
     assert!(
@@ -1276,9 +1276,8 @@ fn test_clean_removes_merged_worktree() {
         .current_dir(dir.path())
         .assert()
         .success()
-        .stderr(predicates::str::contains(
-            "Removing merged worktree 'feature'",
-        ));
+        .stderr(predicates::str::contains("Removing 'feature'"))
+        .stderr(predicates::str::contains("merged into main"));
 
     // Worktree should be gone
     assert!(!wt_path.exists());
@@ -1338,9 +1337,8 @@ fn test_clean_detects_squash_merge() {
         .current_dir(dir.path())
         .assert()
         .success()
-        .stderr(predicates::str::contains(
-            "Removing merged worktree 'feature'",
-        ));
+        .stderr(predicates::str::contains("Removing 'feature'"))
+        .stderr(predicates::str::contains("merged into main"));
 
     // Worktree should be gone
     assert!(!wt_path.exists());
@@ -1411,4 +1409,73 @@ fn test_clean_skips_unmerged_worktree() {
 
     // Worktree should still exist
     assert!(wt_path.exists());
+}
+
+#[test]
+fn test_clean_checks_upstream_branch() {
+    let dir = setup_git_repo();
+
+    // Create a "develop" branch from main
+    StdCommand::new("git")
+        .args(["branch", "develop"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    // Create a worktree for feature branch
+    grove()
+        .args(["add", "feature", "develop"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Make a commit on the feature branch
+    let wt_path = dir.path().join(".git/wt/1");
+    fs::write(wt_path.join("feature.txt"), "feature work").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "feature commit"])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+
+    // Set feature to track develop (simulates pushing and setting upstream)
+    StdCommand::new("git")
+        .args(["branch", "--set-upstream-to=develop", "feature"])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+
+    // Merge feature into develop (not main)
+    StdCommand::new("git")
+        .args(["checkout", "develop"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["merge", "feature"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["checkout", "main"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    // Clean should detect feature is merged into its upstream (develop)
+    grove()
+        .args(["clean"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Removing 'feature'"))
+        .stderr(predicates::str::contains("merged into develop"));
+
+    // Worktree should be gone
+    assert!(!wt_path.exists());
 }
