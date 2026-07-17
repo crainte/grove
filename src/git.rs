@@ -100,6 +100,38 @@ pub fn branch_exists(repo_root: &Path, branch: &str) -> Result<bool> {
     Ok(output.status.success())
 }
 
+/// Get the upstream tracking branch for a local branch (e.g., "origin/import")
+/// Returns the local branch name it tracks (e.g., "import") if it's a local branch
+pub fn upstream_branch(repo_root: &Path, branch: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{}@{{upstream}}", branch),
+        ])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let upstream = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // If it's a remote tracking branch like "origin/import", extract just the branch name
+    // and check if a local branch with that name exists
+    if let Some(branch_name) = upstream.strip_prefix("origin/") {
+        // Check if a local branch exists with this name
+        if branch_exists(repo_root, branch_name).unwrap_or(false) {
+            return Some(branch_name.to_string());
+        }
+    }
+
+    // Return the full upstream ref
+    Some(upstream)
+}
+
 /// Create a git worktree with new branch
 pub fn worktree_add(repo_root: &Path, path: &Path, branch: &str, base: &str) -> Result<()> {
     let output = Command::new("git")
@@ -220,6 +252,22 @@ pub fn pull(repo_root: &Path) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("git pull failed: {}", stderr.trim());
+    }
+
+    Ok(())
+}
+
+/// Fetch all remotes
+pub fn fetch_all(repo_root: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["fetch", "--all", "--prune"])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to execute git fetch --all")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git fetch --all failed: {}", stderr.trim());
     }
 
     Ok(())
