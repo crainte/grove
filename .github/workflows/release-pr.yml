@@ -1,0 +1,146 @@
+name: Release PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Get current version
+        id: current
+        run: |
+          version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+      - name: Determine bump type
+        id: bump
+        run: |
+          if [ "${{ inputs.bump }}" != "auto" ]; then
+            echo "type=${{ inputs.bump }}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Auto-detect from commits since last tag
+          last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$last_tag" ]; then
+            echo "type=minor" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Check for breaking changes or features
+          if git log "$last_tag"..HEAD --oneline | grep -qE '^[a-f0-9]+ feat!|^[a-f0-9]+ fix!|BREAKING'; then
+            echo "type=major" >> $GITHUB_OUTPUT
+          elif git log "$last_tag"..HEAD --oneline | grep -qE '^[a-f0-9]+ feat'; then
+            echo "type=minor" >> $GITHUB_OUTPUT
+          else
+            echo "type=patch" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Calculate new version
+        id: new
+        run: |
+          current="${{ steps.current.outputs.version }}"
+          bump="${{ steps.bump.outputs.type }}"
+          
+          IFS='.' read -r major minor patch <<< "$current"
+          
+          case "$bump" in
+            major) new="$((major + 1)).0.0" ;;
+            minor) new="$major.$((minor + 1)).0" ;;
+            patch) new="$major.$minor.$((patch + 1))" ;;
+          esac
+          
+          echo "version=$new" >> $GITHUB_OUTPUT
+
+      - name: Update Cargo.toml
+        run: |
+          sed -i "s/^version = \".*\"/version = \"${{ steps.new.outputs.version }}\"/" Cargo.toml
+
+      - name: Update Cargo.lock
+        run: cargo generate-lockfile
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          
+          {
+            echo "## What's Changed"
+            echo ""
+            
+            if [ -n "$last_tag" ]; then
+              # Features
+              features=$(git log "$last_tag"..HEAD --oneline --grep="^feat" --format="- %s" | sed 's/^- feat[:(]/- /;s/)$//')
+              if [ -n "$features" ]; then
+                echo "### 🚀 Features"
+                echo "$features"
+                echo ""
+              fi
+              
+              # Fixes
+              fixes=$(git log "$last_tag"..HEAD --oneline --grep="^fix" --format="- %s" | sed 's/^- fix[:(]/- /;s/)$//')
+              if [ -n "$fixes" ]; then
+                echo "### 🐛 Bug Fixes"
+                echo "$fixes"
+                echo ""
+              fi
+              
+              # Other
+              other=$(git log "$last_tag"..HEAD --oneline --grep="^chore\|^ci\|^docs\|^refactor" --format="- %s")
+              if [ -n "$other" ]; then
+                echo "### 🧹 Maintenance"
+                echo "$other"
+                echo ""
+              fi
+            else
+              echo "Initial release"
+            fi
+          } > /tmp/changelog.md
+          
+          # Save for PR body
+          {
+            echo "body<<EOF"
+            cat /tmp/changelog.md
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: release v${{ steps.new.outputs.version }}"
+          branch: release/v${{ steps.new.outputs.version }}
+          delete-branch: true
+          title: "chore: release v${{ steps.new.outputs.version }}"
+          body: |
+            ${{ steps.changelog.outputs.body }}
+            
+            ---
+            
+            **Release v${{ steps.new.outputs.version }}**
+            
+            Merging this PR will:
+            1. Update version to `${{ steps.new.outputs.version }}`
+            2. Trigger binary builds for all platforms
+            3. Create GitHub release with binaries
+          labels: release
