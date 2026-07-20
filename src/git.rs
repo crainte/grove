@@ -45,8 +45,15 @@ pub fn find_repo_root() -> Result<PathBuf> {
 /// Detect if we're in an orphaned worktree (directory deleted but shell still there)
 /// Returns the main repo path if detected
 fn detect_orphaned_worktree() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    let cwd_str = cwd.to_str()?;
+    // Try current_dir first, but fall back to PWD env var
+    // (PWD works even if the directory has been deleted, since shell keeps it)
+    let cwd_str = if let Ok(cwd) = std::env::current_dir() {
+        cwd.to_string_lossy().to_string()
+    } else {
+        // Fall back to PWD environment variable
+        // This is set by the shell and persists even if the directory is deleted
+        std::env::var("PWD").ok()?
+    };
 
     // Check if path contains /.git/wt/
     if let Some(idx) = cwd_str.find("/.git/wt/") {
