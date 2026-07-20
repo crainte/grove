@@ -678,6 +678,10 @@ pub fn clean(target_branch: Option<&str>) -> Result<()> {
 
             if wt_path.exists() {
                 git::worktree_remove(&repo_root, &wt_path, false)?;
+            } else {
+                // Directory is already gone - prune the stale git worktree entry
+                // so we can delete the branch without "branch is used by worktree" error
+                git::worktree_prune(&repo_root)?;
             }
             // Force delete: we've verified the branch is merged via tree comparison,
             // but git -d doesn't recognize squash merges as merged
