@@ -1501,3 +1501,84 @@ fn test_clean_checks_upstream_branch() {
     // Worktree should be gone
     assert!(!wt_path.exists());
 }
+
+#[test]
+fn test_done_from_merged_worktree_outputs_single_cd() {
+    // Set up a bare repo to act as remote
+    let remote_dir = TempDir::new().unwrap();
+    StdCommand::new("git")
+        .args(["init", "--bare"])
+        .current_dir(remote_dir.path())
+        .output()
+        .unwrap();
+
+    let dir = setup_git_repo();
+
+    // Add remote and push main
+    StdCommand::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            remote_dir.path().to_str().unwrap(),
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    // Create and add worktree
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    // Make a commit on the feature branch
+    let wt_path = dir.path().join(".git/wt/1");
+    fs::write(wt_path.join("feature.txt"), "feature work").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "feature commit"])
+        .current_dir(&wt_path)
+        .output()
+        .unwrap();
+
+    // Merge into main (regular merge)
+    StdCommand::new("git")
+        .args(["merge", "feature"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    // Run 'done' from INSIDE the worktree that will be cleaned
+    let output = grove()
+        .args(["done"])
+        .current_dir(&wt_path)
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Removing 'feature'"))
+        .get_output()
+        .stdout
+        .clone();
+
+    // Should output exactly one __grove_cd: line
+    let stdout = String::from_utf8_lossy(&output);
+    let cd_count = stdout.matches("__grove_cd:").count();
+    assert_eq!(
+        cd_count, 1,
+        "Expected exactly 1 __grove_cd: but found {}: {}",
+        cd_count, stdout
+    );
+
+    // Worktree should be gone
+    assert!(!wt_path.exists());
+}
