@@ -723,6 +723,9 @@ pub fn done() -> Result<()> {
 
     let repo_root = git::find_repo_root()?;
 
+    // Change to main repo first (so clean() doesn't think we're in a worktree being removed)
+    env::set_current_dir(&repo_root)?;
+
     // Fetch all remotes (updates tracking branches for merge detection)
     eprintln!("{}", "⟳ Fetching all remotes...".cyan());
     git::fetch_all(&repo_root)?;
