@@ -6,8 +6,8 @@ pub fn init_bash() -> Result<()> {
         r#"# Grove shell integration for Bash
 # Add to ~/.bashrc: eval "$(grove init bash)"
 
-# g - short alias for grove (handles cd)
-g() {{
+# grove wrapper (handles cd)
+grove() {{
     local out
     out=$(command grove "$@")
     local exit_code=$?
@@ -21,6 +21,11 @@ g() {{
     return $exit_code
 }}
 
+# g - short alias for grove
+g() {{
+    grove "$@"
+}}
+
 # Get worktree branch names for completion
 __grove_worktrees() {{
     command grove complete "$1" 2>/dev/null
@@ -31,7 +36,7 @@ _g_complete() {{
     local cur="${{COMP_WORDS[COMP_CWORD]}}"
     local prev="${{COMP_WORDS[COMP_CWORD-1]}}"
     
-    local commands="go add rm list ls prune clean done pull push path init sync help"
+    local commands="go add rm list ls prune clean done pull push path init sync help config"
     
     case "${{prev}}" in
         go|path)
@@ -47,7 +52,7 @@ _g_complete() {{
             local branches=$(git branch --format='%(refname:short)' 2>/dev/null)
             COMPREPLY=( $(compgen -W "${{branches}}" -- "$cur") )
             ;;
-        g)
+        g|grove)
             # First argument - commands or worktree names (go creates if needed)
             COMPREPLY=( $(compgen -W "${{commands}} $(__grove_worktrees go)" -- "$cur") )
             ;;
@@ -59,7 +64,7 @@ _g_complete() {{
     esac
 }}
 
-complete -F _g_complete g
+complete -F _g_complete g grove
 "#
     );
 
@@ -72,8 +77,8 @@ pub fn init_zsh() -> Result<()> {
         r#"# Grove shell integration for Zsh
 # Add to ~/.zshrc: eval "$(grove init zsh)"
 
-# g - short alias for grove (handles cd)
-g() {{
+# grove wrapper (handles cd)
+grove() {{
     local out
     out=$(command grove "$@")
     local exit_code=$?
@@ -87,6 +92,11 @@ g() {{
     return $exit_code
 }}
 
+# g - short alias for grove
+g() {{
+    grove "$@"
+}}
+
 # Get worktree branch names for completion
 __grove_worktrees() {{
     command grove complete "$1" 2>/dev/null
@@ -94,7 +104,7 @@ __grove_worktrees() {{
 
 # Zsh completion for g
 _g_complete() {{
-    local commands="go add rm list ls prune clean done pull push path init sync help"
+    local commands="go add rm list ls prune clean done pull push path init sync help config"
     
     case "${{words[2]}}" in
         go|path)
@@ -119,7 +129,7 @@ _g_complete() {{
     esac
 }}
 
-compdef _g_complete g
+compdef _g_complete g grove
 "#
     );
 
@@ -132,8 +142,8 @@ pub fn init_fish() -> Result<()> {
         r#"# Grove shell integration for Fish
 # Add to ~/.config/fish/config.fish: grove init fish | source
 
-# g - short alias for grove (handles cd)
-function g
+# grove wrapper (handles cd)
+function grove
     set -l out (command grove $argv)
     set -l exit_code $status
     
@@ -146,17 +156,27 @@ function g
     return $exit_code
 end
 
+# g - short alias for grove
+function g
+    grove $argv
+end
+
 # Get worktree branch names for completion
 function __grove_worktrees
     command grove complete $argv[1] 2>/dev/null
 end
 
-# Completions for g
-complete -c g -f -n '__fish_use_subcommand' -a 'go add rm list ls prune clean done pull push path init sync help'
+# Completions for g and grove
+complete -c g -f -n '__fish_use_subcommand' -a 'go add rm list ls prune clean done pull push path init sync help config'
 complete -c g -f -n '__fish_use_subcommand' -a '(__grove_worktrees go)'
 complete -c g -f -n '__fish_seen_subcommand_from go path' -a '(__grove_worktrees go)'
 complete -c g -f -n '__fish_seen_subcommand_from rm' -a '(__grove_worktrees rm)'
 complete -c g -f -n '__fish_seen_subcommand_from add' -a '(git branch --format="%(refname:short)" 2>/dev/null)'
+complete -c grove -f -n '__fish_use_subcommand' -a 'go add rm list ls prune clean done pull push path init sync help config'
+complete -c grove -f -n '__fish_use_subcommand' -a '(__grove_worktrees go)'
+complete -c grove -f -n '__fish_seen_subcommand_from go path' -a '(__grove_worktrees go)'
+complete -c grove -f -n '__fish_seen_subcommand_from rm' -a '(__grove_worktrees rm)'
+complete -c grove -f -n '__fish_seen_subcommand_from add' -a '(git branch --format="%(refname:short)" 2>/dev/null)'
 "#
     );
 
