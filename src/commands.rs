@@ -883,6 +883,14 @@ fn create_worktree(
         return Err(e);
     }
 
+    // Ensure git hooks work in worktrees
+    if git::ensure_hooks_path(repo_root)? {
+        eprintln!(
+            "  {}",
+            "Configured core.hooksPath for worktree hooks".dimmed()
+        );
+    }
+
     // Copy files matching patterns from config
     if !config.copy.is_empty() {
         let files = crate::copyfiles::list_matching_files(repo_root, &config.copy)?;

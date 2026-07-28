@@ -112,8 +112,21 @@ fn merge_hook_blocks(
 }
 
 fn dirs_path() -> Result<PathBuf> {
+    // Allow override for testing
+    if let Ok(dir) = std::env::var("GROVE_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
     let home = std::env::var("HOME").context("HOME not set")?;
     Ok(PathBuf::from(home).join(".config/grove"))
+}
+
+#[cfg(test)]
+impl Config {
+    /// Load config without reading global config (for testing)
+    pub fn load_isolated(repo_root: &Path) -> Result<Self> {
+        let local = Self::load_local(repo_root).unwrap_or_default();
+        Ok(Self::merge(RawConfig::default(), local))
+    }
 }
 
 /// Raw TOML structure for deserialization
@@ -244,7 +257,8 @@ server = "npm run dev"
     #[test]
     fn test_load_missing_config() {
         let dir = TempDir::new().unwrap();
-        let config = Config::load(dir.path()).unwrap();
+        // Use load_isolated to avoid reading user's global config
+        let config = Config::load_isolated(dir.path()).unwrap();
         assert!(config.copy.is_empty());
         assert!(config.hooks.post_create.is_empty());
     }
@@ -253,7 +267,8 @@ server = "npm run dev"
     fn test_load_local_config() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(".grove.toml"), "copy = [\".env*\"]").unwrap();
-        let config = Config::load(dir.path()).unwrap();
+        // Use load_isolated to avoid reading user's global config
+        let config = Config::load_isolated(dir.path()).unwrap();
         assert_eq!(config.copy.len(), 1);
         assert_eq!(config.copy[0], ".env*");
     }
