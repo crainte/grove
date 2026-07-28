@@ -381,6 +381,60 @@ pub fn wt_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".git/wt")
 }
 
+/// Ensure worktrees can find hooks from the main repo.
+/// Sets core.hooksPath if not already configured and hooks directory exists.
+/// Returns true if hooksPath was configured.
+pub fn ensure_hooks_path(repo_root: &Path) -> Result<bool> {
+    // Check if core.hooksPath is already set
+    let output = Command::new("git")
+        .args(["config", "core.hooksPath"])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to check core.hooksPath")?;
+
+    // If already set, nothing to do
+    if output.status.success() && !output.stdout.is_empty() {
+        return Ok(false);
+    }
+
+    // Get the common git directory (where hooks live)
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to get git common dir")?;
+
+    if !output.status.success() {
+        return Ok(false);
+    }
+
+    let common_dir_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let common_dir = if Path::new(&common_dir_str).is_absolute() {
+        PathBuf::from(&common_dir_str)
+    } else {
+        repo_root.join(&common_dir_str)
+    };
+    let hooks_dir = common_dir.join("hooks");
+
+    // Only set if hooks directory exists
+    if !hooks_dir.is_dir() {
+        return Ok(false);
+    }
+
+    // Set core.hooksPath
+    let status = Command::new("git")
+        .args([
+            "config",
+            "core.hooksPath",
+            hooks_dir.to_str().unwrap_or_default(),
+        ])
+        .current_dir(repo_root)
+        .status()
+        .context("Failed to set core.hooksPath")?;
+
+    Ok(status.success())
+}
+
 /// Info about a git worktree
 #[derive(Debug)]
 pub struct GitWorktree {
@@ -502,5 +556,103 @@ mod tests {
     fn test_wt_dir() {
         let root = PathBuf::from("/repo");
         assert_eq!(wt_dir(&root), PathBuf::from("/repo/.git/wt"));
+    }
+
+    #[test]
+    fn test_ensure_hooks_path_sets_when_hooks_exist() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        // Create a temp git repo
+        let dir = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        // Create hooks directory with a sample hook
+        let hooks_dir = dir.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(hooks_dir.join("pre-commit"), "#!/bin/sh\nexit 0").unwrap();
+
+        // Ensure no hooksPath is set initially
+        Command::new("git")
+            .args(["config", "--unset", "core.hooksPath"])
+            .current_dir(dir.path())
+            .output()
+            .ok();
+
+        // Should configure hooksPath
+        let result = ensure_hooks_path(dir.path()).unwrap();
+        assert!(result, "Should have configured hooksPath");
+
+        // Verify it was set
+        let output = Command::new("git")
+            .args(["config", "core.hooksPath"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let hooks_path = String::from_utf8_lossy(&output.stdout);
+        assert!(hooks_path.trim().ends_with("/hooks"));
+    }
+
+    #[test]
+    fn test_ensure_hooks_path_skips_when_already_set() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        // Create a temp git repo
+        let dir = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        // Set hooksPath to a custom value
+        Command::new("git")
+            .args(["config", "core.hooksPath", "/custom/hooks"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        // Should not change existing hooksPath
+        let result = ensure_hooks_path(dir.path()).unwrap();
+        assert!(!result, "Should not have changed existing hooksPath");
+
+        // Verify it's still the custom value
+        let output = Command::new("git")
+            .args(["config", "core.hooksPath"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let hooks_path = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(hooks_path.trim(), "/custom/hooks");
+    }
+
+    #[test]
+    fn test_ensure_hooks_path_skips_when_no_hooks_dir() {
+        use std::process::Command;
+        use tempfile::TempDir;
+
+        // Create a temp git repo
+        let dir = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        // Remove hooks directory
+        let hooks_dir = dir.path().join(".git/hooks");
+        if hooks_dir.exists() {
+            std::fs::remove_dir_all(&hooks_dir).unwrap();
+        }
+
+        // Should not configure hooksPath when no hooks dir
+        let result = ensure_hooks_path(dir.path()).unwrap();
+        assert!(!result, "Should not configure when no hooks directory");
     }
 }
