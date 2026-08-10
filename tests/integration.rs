@@ -1582,3 +1582,51 @@ fn test_done_from_merged_worktree_outputs_single_cd() {
     // Worktree should be gone
     assert!(!wt_path.exists());
 }
+
+// =============================================================================
+// -C FLAG TESTS
+// =============================================================================
+
+#[test]
+fn test_dash_c_runs_in_specified_directory() {
+    let repo = setup_git_repo();
+
+    // Run from a different directory (temp dir root), but use -C to point at repo
+    grove()
+        .arg("-C")
+        .arg(repo.path())
+        .arg("list")
+        .current_dir(std::env::temp_dir())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("🌳 Git Worktrees"));
+}
+
+#[test]
+fn test_dash_c_with_add_command() {
+    let repo = setup_git_repo();
+
+    // Create worktree using -C from outside the repo
+    grove()
+        .arg("-C")
+        .arg(repo.path())
+        .args(["add", "feature"])
+        .current_dir(std::env::temp_dir())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Worktree created"));
+
+    // Verify worktree exists
+    assert!(repo.path().join(".git/wt/1").exists());
+}
+
+#[test]
+fn test_dash_c_with_invalid_path() {
+    grove()
+        .arg("-C")
+        .arg("/nonexistent/path/that/does/not/exist")
+        .arg("list")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Failed to change to"));
+}
