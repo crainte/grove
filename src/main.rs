@@ -8,6 +8,7 @@ mod shell;
 
 use clap::Parser;
 use colored::Colorize;
+use std::env;
 use std::io::IsTerminal;
 
 fn main() {
@@ -17,6 +18,14 @@ fn main() {
     }
 
     let cli = cli::Cli::parse();
+
+    if let Some(ref dir) = cli.directory
+        && let Err(e) = env::set_current_dir(dir)
+    {
+        eprintln!("{} Failed to change to {}: {}", "✗".red(), dir.display(), e);
+        std::process::exit(1);
+    }
+
     if let Err(e) = cli.run() {
         let msg = format!("{}", e);
         // Warnings are recoverable (user can --force, etc.)

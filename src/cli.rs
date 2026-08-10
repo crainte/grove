@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{ColorChoice, Parser, Subcommand, builder::styling};
+use std::path::PathBuf;
 
 use crate::commands;
 
@@ -18,6 +19,10 @@ const STYLES: styling::Styles = styling::Styles::styled()
 #[command(styles = STYLES)]
 #[command(after_help = "Run 'grove <command> --help' for more info on a command.")]
 pub struct Cli {
+    /// Run as if grove was started in <path>
+    #[arg(short = 'C', global = true, value_name = "PATH")]
+    pub directory: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 
