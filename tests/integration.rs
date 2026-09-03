@@ -1058,6 +1058,66 @@ fn test_config_copy_empty() {
     );
 }
 
+#[test]
+#[cfg(unix)]
+fn test_add_copies_symlinked_directory() {
+    use std::os::unix::fs::symlink;
+
+    let dir = setup_git_repo();
+
+    // Mirror the Terraform plugin-cache layout: a real directory plus a symlink
+    // pointing at it by absolute path. `git ls-files --others --ignored` reports
+    // the symlink as a single entry and does not descend into it.
+    fs::create_dir(dir.path().join("cache")).unwrap();
+    fs::write(dir.path().join("cache/bin.txt"), "provider-binary").unwrap();
+    fs::create_dir(dir.path().join("providers")).unwrap();
+    symlink(
+        dir.path().join("cache"),
+        dir.path().join("providers/current"),
+    )
+    .unwrap();
+
+    fs::write(dir.path().join(".gitignore"), "cache/\nproviders/\n").unwrap();
+    fs::write(dir.path().join(".grove.toml"), "copy = [\"providers/\"]").unwrap();
+    StdCommand::new("git")
+        .args(["add", ".gitignore", ".grove.toml"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "Add gitignore"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    grove()
+        .args(["add", "feature"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let wt_path = dir.path().join(".git/wt");
+    let entries: Vec<_> = fs::read_dir(&wt_path)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir() && e.file_name() != "grove.db")
+        .collect();
+    assert_eq!(entries.len(), 1);
+    let wt_dir = entries[0].path();
+
+    let copied_link = wt_dir.join("providers/current");
+    let meta = fs::symlink_metadata(&copied_link)
+        .expect("providers/current should exist in the new worktree");
+    assert!(
+        meta.file_type().is_symlink(),
+        "providers/current should be preserved as a symlink, not dereferenced"
+    );
+    assert_eq!(
+        fs::read_to_string(copied_link.join("bin.txt")).expect("link should resolve"),
+        "provider-binary"
+    );
+}
+
 // =============================================================================
 // HOOK TESTS
 // =============================================================================

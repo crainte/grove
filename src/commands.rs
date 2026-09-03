@@ -767,7 +767,7 @@ pub fn pull(paths: &[String]) -> Result<()> {
         eprintln!("{} {}", "📥 Pulling from main:".cyan(), paths.join(", "));
     }
 
-    let (count, files) = crate::copyfiles::sync_ignored(src, dest, paths)?;
+    let (report, files) = crate::copyfiles::sync_ignored(src, dest, paths)?;
 
     if !files.is_empty() {
         for line in summarize_files(&files) {
@@ -775,7 +775,8 @@ pub fn pull(paths: &[String]) -> Result<()> {
         }
     }
 
-    eprintln!("{}", format!("✓ Pulled {} file(s)", count).green());
+    eprintln!("{}", format!("✓ Pulled {} file(s)", report.copied).green());
+    warn_copy_failures(&report);
     Ok(())
 }
 
@@ -803,7 +804,7 @@ pub fn push(paths: &[String]) -> Result<()> {
         eprintln!("{} {}", "📤 Pushing to main:".cyan(), paths.join(", "));
     }
 
-    let (count, files) = crate::copyfiles::sync_ignored(src, dest, paths)?;
+    let (report, files) = crate::copyfiles::sync_ignored(src, dest, paths)?;
 
     if !files.is_empty() {
         for line in summarize_files(&files) {
@@ -811,7 +812,8 @@ pub fn push(paths: &[String]) -> Result<()> {
         }
     }
 
-    eprintln!("{}", format!("✓ Pushed {} file(s)", count).green());
+    eprintln!("{}", format!("✓ Pushed {} file(s)", report.copied).green());
+    warn_copy_failures(&report);
     Ok(())
 }
 
@@ -901,10 +903,11 @@ fn create_worktree(
                 eprintln!("    {}", line.dimmed());
             }
 
-            let copied = crate::copyfiles::copy_files_parallel(&files, repo_root, &wt_path)?;
-            if copied > 0 {
-                eprintln!("  {}", format!("✓ Copied {} files", copied).dimmed());
+            let report = crate::copyfiles::copy_files_parallel(&files, repo_root, &wt_path)?;
+            if report.copied > 0 {
+                eprintln!("  {}", format!("✓ Copied {} files", report.copied).dimmed());
             }
+            warn_copy_failures(&report);
         }
     }
 
@@ -975,6 +978,34 @@ fn summarize_files(files: &[String]) -> Vec<String> {
     }
 
     result
+}
+
+/// Warn about files that could not be copied
+///
+/// A partial copy is recoverable - the worktree is still usable - so this warns
+/// rather than failing the command.
+fn warn_copy_failures(report: &crate::copyfiles::CopyReport) {
+    use colored::Colorize;
+
+    if report.failed.is_empty() {
+        return;
+    }
+
+    eprintln!(
+        "{}",
+        format!("⚠ {} file(s) could not be copied", report.failed.len()).yellow()
+    );
+
+    for (path, err) in report.failed.iter().take(5) {
+        eprintln!("    {}", format!("{}: {}", path, err).dimmed());
+    }
+
+    if report.failed.len() > 5 {
+        eprintln!(
+            "    {}",
+            format!("+ {} more", report.failed.len() - 5).dimmed()
+        );
+    }
 }
 
 /// Output worktree names for shell completion
