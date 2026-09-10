@@ -101,3 +101,4 @@ jobs:
           target: ${{ matrix.target }}
           ref: refs/tags/v${{ needs.check-release.outputs.version }}
           token: ${{ secrets.GITHUB_TOKEN }}
+          locked: true
