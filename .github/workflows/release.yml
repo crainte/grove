@@ -26,11 +26,11 @@ jobs:
           OLD=$(git show HEAD^:Cargo.toml 2>/dev/null | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/' || echo "")
           
           if [ "$NEW" != "$OLD" ]; then
-            echo "should_release=true" >> $GITHUB_OUTPUT
-            echo "version=$NEW" >> $GITHUB_OUTPUT
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "version=$NEW" >> "$GITHUB_OUTPUT"
             echo "Version changed: $OLD -> $NEW"
           else
-            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
             echo "Version unchanged ($NEW)"
           fi
 
