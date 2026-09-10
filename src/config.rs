@@ -8,6 +8,8 @@ use std::process::Command;
 #[derive(Debug, Default)]
 pub struct Config {
     pub copy: Vec<String>,
+    /// Copy every gitignored file to new worktrees, ignoring `copy` patterns
+    pub copy_ignored: bool,
     pub hooks: Hooks,
 }
 
@@ -71,6 +73,9 @@ impl Config {
         let mut copy = global.copy;
         copy.extend(local.copy);
 
+        // A boolean has no meaningful union, so local wins outright
+        let copy_ignored = local.copyignored.or(global.copyignored).unwrap_or_default();
+
         // Merge hooks: local blocks come after global blocks
         let hooks = Hooks {
             post_create: merge_hook_blocks(
@@ -83,7 +88,11 @@ impl Config {
             ),
         };
 
-        Self { copy, hooks }
+        Self {
+            copy,
+            copy_ignored,
+            hooks,
+        }
     }
 }
 
@@ -134,6 +143,8 @@ impl Config {
 struct RawConfig {
     #[serde(default)]
     copy: Vec<String>,
+    #[serde(default)]
+    copyignored: Option<bool>,
     hooks: Option<RawHooks>,
 }
 
@@ -222,6 +233,42 @@ copy = [".env*", ".terraform/"]
         assert_eq!(raw.copy.len(), 2);
         assert_eq!(raw.copy[0], ".env*");
         assert_eq!(raw.copy[1], ".terraform/");
+    }
+
+    #[test]
+    fn test_parse_copyignored() {
+        let raw: RawConfig = toml::from_str("copyignored = true").unwrap();
+        assert_eq!(raw.copyignored, Some(true));
+    }
+
+    #[test]
+    fn test_copyignored_defaults_false() {
+        let dir = TempDir::new().unwrap();
+        // Use load_isolated to avoid reading user's global config
+        let config = Config::load_isolated(dir.path()).unwrap();
+        assert!(!config.copy_ignored);
+    }
+
+    #[test]
+    fn test_copyignored_local_overrides_global() {
+        let global = RawConfig {
+            copyignored: Some(true),
+            ..Default::default()
+        };
+        let local = RawConfig {
+            copyignored: Some(false),
+            ..Default::default()
+        };
+        assert!(!Config::merge(global, local).copy_ignored);
+    }
+
+    #[test]
+    fn test_copyignored_inherits_from_global_when_local_unset() {
+        let global = RawConfig {
+            copyignored: Some(true),
+            ..Default::default()
+        };
+        assert!(Config::merge(global, RawConfig::default()).copy_ignored);
     }
 
     #[test]

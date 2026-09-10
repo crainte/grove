@@ -893,22 +893,30 @@ fn create_worktree(
         );
     }
 
-    // Copy files matching patterns from config
-    if !config.copy.is_empty() {
-        let files = crate::copyfiles::list_matching_files(repo_root, &config.copy)?;
-        if !files.is_empty() {
-            let summary = summarize_files(&files);
-            eprintln!("  {}", format!("Copying {} files...", files.len()).dimmed());
-            for line in &summary {
-                eprintln!("    {}", line.dimmed());
-            }
+    // Copy ignored files from the primary worktree.
+    // `copyignored` takes everything and so supersedes the `copy` patterns.
+    // Both draw from `git ls-files --others --ignored`, which never lists
+    // `.git`, so neither can reach outside the ignored set.
+    let files = if config.copy_ignored {
+        crate::copyfiles::list_ignored_files(repo_root)?
+    } else if !config.copy.is_empty() {
+        crate::copyfiles::list_matching_files(repo_root, &config.copy)?
+    } else {
+        Vec::new()
+    };
 
-            let report = crate::copyfiles::copy_files_parallel(&files, repo_root, &wt_path)?;
-            if report.copied > 0 {
-                eprintln!("  {}", format!("✓ Copied {} files", report.copied).dimmed());
-            }
-            warn_copy_failures(&report);
+    if !files.is_empty() {
+        let summary = summarize_files(&files);
+        eprintln!("  {}", format!("Copying {} files...", files.len()).dimmed());
+        for line in &summary {
+            eprintln!("    {}", line.dimmed());
         }
+
+        let report = crate::copyfiles::copy_files_parallel(&files, repo_root, &wt_path)?;
+        if report.copied > 0 {
+            eprintln!("  {}", format!("✓ Copied {} files", report.copied).dimmed());
+        }
+        warn_copy_failures(&report);
     }
 
     // Run post-create hooks
