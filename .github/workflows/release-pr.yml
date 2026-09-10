@@ -81,7 +81,7 @@ jobs:
           sed -i "s/^version = \".*\"/version = \"${{ steps.new.outputs.version }}\"/" Cargo.toml
 
       - name: Update Cargo.lock
-        run: cargo generate-lockfile
+        run: cargo update --workspace
 
       - name: Generate changelog
         id: changelog
