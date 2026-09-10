@@ -53,7 +53,36 @@ fn setup_git_repo() -> TempDir {
 }
 
 fn grove() -> Command {
-    Command::cargo_bin("grove").unwrap()
+    let mut cmd = Command::cargo_bin("grove").unwrap();
+    // Never read the developer's real global config - tests must be hermetic.
+    // The path does not exist, so `load_global` falls back to defaults.
+    cmd.env("GROVE_CONFIG_DIR", "/nonexistent/grove-test-config");
+    cmd
+}
+
+/// Commit a .gitignore so subsequent files are treated as ignored
+fn commit_gitignore(repo: &TempDir, contents: &str) {
+    fs::write(repo.path().join(".gitignore"), contents).unwrap();
+    StdCommand::new("git")
+        .args(["add", ".gitignore"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "add gitignore"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+}
+
+/// Resolve the on-disk path of a named worktree
+fn worktree_path(repo: &TempDir, name: &str) -> std::path::PathBuf {
+    let output = grove()
+        .args(["path", name])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
 }
 
 // =============================================================================
@@ -261,29 +290,13 @@ fn test_add_copies_ignored_files_when_enabled() {
 }
 
 #[test]
-fn test_add_does_not_copy_ignored_files_when_disabled() {
+fn test_add_does_not_copy_ignored_files_by_default() {
     let repo = setup_git_repo();
 
-    // Explicitly disable copyignored via .grove.toml
-    fs::write(repo.path().join(".grove.toml"), "copyignored = false").unwrap();
-
-    // Create .gitignore
-    fs::write(repo.path().join(".gitignore"), ".env\n").unwrap();
-    StdCommand::new("git")
-        .args(["add", ".gitignore"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-    StdCommand::new("git")
-        .args(["commit", "-m", "add gitignore"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-
-    // Create ignored file
+    // No .grove.toml at all: no copy patterns, copyignored unset
+    commit_gitignore(&repo, ".env\n");
     fs::write(repo.path().join(".env"), "SECRET=123").unwrap();
 
-    // Create worktree - should NOT auto-copy ignored files
     grove()
         .args(["add", "feature"])
         .current_dir(repo.path())
@@ -291,14 +304,109 @@ fn test_add_does_not_copy_ignored_files_when_disabled() {
         .success()
         .stderr(predicate::str::contains("Copying").not());
 
-    // Verify file was NOT copied
-    let output = grove()
-        .args(["path", "feature"])
+    assert!(!worktree_path(&repo, "feature").join(".env").exists());
+}
+
+#[test]
+fn test_add_does_not_copy_ignored_files_when_copyignored_false() {
+    let repo = setup_git_repo();
+
+    fs::write(repo.path().join(".grove.toml"), "copyignored = false").unwrap();
+    commit_gitignore(&repo, ".env\n");
+    fs::write(repo.path().join(".env"), "SECRET=123").unwrap();
+
+    grove()
+        .args(["add", "feature"])
         .current_dir(repo.path())
-        .output()
-        .unwrap();
-    let wt_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    assert!(!std::path::Path::new(&wt_path).join(".env").exists());
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Copying").not());
+
+    assert!(!worktree_path(&repo, "feature").join(".env").exists());
+}
+
+#[test]
+fn test_add_copies_all_ignored_files_with_copyignored() {
+    let repo = setup_git_repo();
+
+    // copyignored with no copy patterns at all
+    fs::write(repo.path().join(".grove.toml"), "copyignored = true").unwrap();
+    commit_gitignore(&repo, ".env\nlogs/\n");
+
+    fs::write(repo.path().join(".env"), "SECRET=123").unwrap();
+    fs::create_dir(repo.path().join("logs")).unwrap();
+    fs::write(repo.path().join("logs/app.log"), "boot").unwrap();
+
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Copying"));
+
+    let wt = worktree_path(&repo, "feature");
+    assert!(wt.join(".env").exists());
+    assert!(wt.join("logs/app.log").exists());
+}
+
+#[test]
+fn test_copyignored_supersedes_copy_patterns() {
+    let repo = setup_git_repo();
+
+    // A narrow copy pattern must not restrict copyignored
+    fs::write(
+        repo.path().join(".grove.toml"),
+        "copyignored = true\ncopy = [\".env\"]\n",
+    )
+    .unwrap();
+    commit_gitignore(&repo, ".env\nlogs/\n");
+
+    fs::write(repo.path().join(".env"), "SECRET=123").unwrap();
+    fs::create_dir(repo.path().join("logs")).unwrap();
+    fs::write(repo.path().join("logs/app.log"), "boot").unwrap();
+
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let wt = worktree_path(&repo, "feature");
+    assert!(wt.join(".env").exists());
+    assert!(
+        wt.join("logs/app.log").exists(),
+        "copyignored must copy files outside the copy patterns"
+    );
+}
+
+#[test]
+fn test_copyignored_does_not_copy_git_dir() {
+    let repo = setup_git_repo();
+
+    fs::write(repo.path().join(".grove.toml"), "copyignored = true").unwrap();
+    commit_gitignore(&repo, ".env\n");
+    fs::write(repo.path().join(".env"), "SECRET=123").unwrap();
+
+    // An existing sibling worktree lives under .git/wt/, so a naive
+    // "copy everything" would recursively drag it into the new worktree.
+    grove()
+        .args(["add", "sibling"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let wt = worktree_path(&repo, "feature");
+    assert!(wt.join(".env").exists());
+    assert!(
+        !wt.join(".git/wt").exists(),
+        "must never copy .git contents into a worktree"
+    );
 }
 
 #[test]

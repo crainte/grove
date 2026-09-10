@@ -87,27 +87,34 @@ Grove uses TOML config files:
 
 ```toml
 # .grove.toml
-copyignored = true  # auto-copy .gitignored files to new worktrees
+
+# Copy matching .gitignored files into new worktrees
+copy = [".env*", ".terraform/", ".mise.local.toml"]
+
+# Or copy every .gitignored file (default: false).
+# When true, this supersedes `copy`.
+copyignored = true
 
 # Hooks - blocks run sequentially, tasks within a block run in parallel
-[[hook.post-create]]
+[[hooks.post-create]]
 trust = "mise trust {{path}}"
-
-[[hook.post-enter]]
 deps = "npm ci"
-server = "npm run dev"
+
+[[hooks.pre-remove]]
+backup = "cp -r {{path}}/data {{repo}}/backup/"
 ```
+
+Only `.gitignored` files are ever copied - tracked files come from git itself.
+`copy` patterns accept exact names (`.env`), globs (`.env*`), and directories
+(`.terraform/`). Local `.grove.toml` `copy` patterns extend the global list,
+while `copyignored` is overridden outright by the more local config.
 
 ### Hook Types
 
-| Hook | When |
-|------|------|
-| `pre-create` | Before worktree created (can abort) |
-| `post-create` | After created, before cd |
-| `pre-enter` | Before switching to worktree (can abort) |
-| `post-enter` | After switching |
-| `pre-remove` | Before removal (can abort) |
-| `post-remove` | After removal |
+| Hook | When | Runs in |
+|------|------|---------|
+| `post-create` | After worktree created, before cd | Current worktree |
+| `pre-remove` | Before worktree removed | Worktree being removed |
 
 ### Template Variables
 

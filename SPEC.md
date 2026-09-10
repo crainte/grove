@@ -94,12 +94,30 @@ grove config            # Show/set configuration
 
 ## Configuration
 
-Stored in git config:
+TOML files, local overriding global:
 
-```bash
-git config grove.copyignored true     # Auto-copy gitignored files
-git config --add grove.hook "mise trust"  # Post-create hooks
+- **Global**: `~/.config/grove/config.toml`
+- **Local**: `.grove.toml` in repo root
+
+```toml
+# Copy matching .gitignored files into new worktrees
+copy = [".env*", ".terraform/", ".mise.local.toml"]
+
+# Or copy every .gitignored file (default: false, supersedes `copy`)
+copyignored = true
+
+# Hooks: blocks run sequentially, tasks within a block run in parallel
+[[hooks.post-create]]
+trust = "mise trust {{path}}/mise.toml"
+deps = "npm ci"
+
+[[hooks.pre-remove]]
+backup = "cp -r {{path}}/data {{repo}}/backup/"
 ```
+
+`copy` patterns from the local config extend the global list; `copyignored` is
+overridden outright by the more local config. Hooks support the template
+variables `{{path}}`, `{{branch}}`, `{{id}}`, and `{{repo}}`.
 
 ## Shell Integration Protocol
 
