@@ -39,3 +39,11 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
