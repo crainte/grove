@@ -323,13 +323,18 @@ pub fn worktree_status(worktree_path: &Path) -> Result<(bool, bool)> {
     Ok((has_modified, has_untracked))
 }
 
-/// Get ahead/behind counts for a branch
-/// Returns (ahead, behind) relative to upstream or parent branch
-pub fn ahead_behind(
+/// Get ahead/behind counts for a branch, and the ref they were measured
+/// against.
+///
+/// Returns (ahead, behind, base). The comparison ref is not obvious from the call site: an upstream tracking
+/// branch wins if one exists, otherwise `compare_to` (a parent branch for
+/// nested worktrees, the default branch for top-level ones). Bare counts are
+/// ambiguous without it, so porcelain output reports the base.
+pub fn ahead_behind_against(
     worktree_path: &Path,
     branch: &str,
     compare_to: Option<&str>,
-) -> Result<(u32, u32)> {
+) -> Result<(u32, u32, Option<String>)> {
     // First try upstream tracking branch
     let upstream = Command::new("git")
         .args([
@@ -346,7 +351,7 @@ pub fn ahead_behind(
     } else if let Some(parent) = compare_to {
         parent.to_string()
     } else {
-        return Ok((0, 0)); // Nothing to compare to
+        return Ok((0, 0, None)); // Nothing to compare to
     };
 
     let output = Command::new("git")
@@ -361,7 +366,7 @@ pub fn ahead_behind(
         .context("Failed to get ahead/behind")?;
 
     if !output.status.success() {
-        return Ok((0, 0));
+        return Ok((0, 0, Some(compare_ref)));
     }
 
     let counts = String::from_utf8_lossy(&output.stdout);
@@ -370,9 +375,9 @@ pub fn ahead_behind(
     if parts.len() == 2 {
         let ahead = parts[0].parse().unwrap_or(0);
         let behind = parts[1].parse().unwrap_or(0);
-        Ok((ahead, behind))
+        Ok((ahead, behind, Some(compare_ref)))
     } else {
-        Ok((0, 0))
+        Ok((0, 0, Some(compare_ref)))
     }
 }
 

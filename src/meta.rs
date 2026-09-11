@@ -9,6 +9,15 @@ pub struct WorktreeInfo {
     pub branch: String,
 }
 
+/// Outcome of reconciling the database against git's own worktree list.
+pub struct SyncReport {
+    /// Worktrees present in git but missing from the database.
+    pub imported: Vec<(String, WorktreeInfo)>,
+    /// (id, branch) pairs dropped from the database because git no longer
+    /// knows about them and the directory is gone.
+    pub removed: Vec<(String, String)>,
+}
+
 /// Metadata database for worktrees in a repository
 pub struct Meta {
     conn: Connection,
@@ -112,6 +121,24 @@ impl Meta {
         if let Some(row) = rows.next()? {
             let branch: String = row.get(0)?;
             Ok(Some(WorktreeInfo { branch }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get a worktree's parent ID.
+    ///
+    /// The parent may no longer exist - that is precisely what makes a worktree
+    /// an orphan - so this reports the stored reference without validating it.
+    pub fn parent_of(&self, id: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT parent FROM worktrees WHERE id = ?1")?;
+
+        let mut rows = stmt.query(params![id])?;
+
+        if let Some(row) = rows.next()? {
+            Ok(row.get(0)?)
         } else {
             Ok(None)
         }
@@ -269,12 +296,14 @@ impl Meta {
         Ok(())
     }
 
-    /// Sync database with git worktrees
-    /// Returns (imported, removed) counts
-    pub fn sync(&self, git_worktrees: &[crate::git::GitWorktree]) -> Result<(usize, usize)> {
+    /// Sync database with git worktrees.
+    ///
+    /// Returns the worktrees that were imported and the ids that were dropped,
+    /// rather than bare counts, so callers can report specifics.
+    pub fn sync(&self, git_worktrees: &[crate::git::GitWorktree]) -> Result<SyncReport> {
         let wt_dir = self.repo_root.join(".git/wt");
-        let mut imported = 0;
-        let mut removed = 0;
+        let mut imported = Vec::new();
+        let mut removed = Vec::new();
 
         // Import worktrees that exist in git but not in our database
         for wt in git_worktrees {
@@ -299,6 +328,7 @@ impl Meta {
                 Some(b) => b.clone(),
                 None => continue, // Skip detached HEAD worktrees
             };
+            let branch_for_record = branch.clone();
 
             // Import it
             let created = chrono::Utc::now().to_rfc3339();
@@ -315,7 +345,12 @@ impl Meta {
                 )?;
             }
 
-            imported += 1;
+            imported.push((
+                id.to_string(),
+                WorktreeInfo {
+                    branch: branch_for_record,
+                },
+            ));
         }
 
         // Remove entries that no longer exist in git
@@ -330,13 +365,14 @@ impl Meta {
             let exists_in_git = git_worktrees.iter().any(|wt| wt.path == our_path);
 
             if !exists_in_git && !our_path.exists() {
+                let info = self.get_worktree(&id)?;
                 self.conn
                     .execute("DELETE FROM worktrees WHERE id = ?1", rusqlite::params![id])?;
-                removed += 1;
+                removed.push((id, info.map(|i| i.branch).unwrap_or_default()));
             }
         }
 
-        Ok((imported, removed))
+        Ok(SyncReport { imported, removed })
     }
 }
 

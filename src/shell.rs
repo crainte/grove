@@ -187,8 +187,17 @@ complete -c grove -f -n '__fish_seen_subcommand_from add' -a '(git branch --form
 pub const CD_PREFIX: &str = "__grove_cd:";
 
 /// Output a cd command for the shell wrapper
+/// Emit a navigation directive.
+///
+/// In porcelain mode this becomes a `cd` record so consumers parse one format
+/// rather than special-casing the shell prefix; the shell wrapper never runs
+/// with `--porcelain`.
 pub fn output_cd(path: &std::path::Path) {
-    println!("{}{}", CD_PREFIX, path.display());
+    if crate::porcelain::enabled() {
+        crate::porcelain::record(&["cd", &path.display().to_string()]);
+    } else {
+        println!("{}{}", CD_PREFIX, path.display());
+    }
 }
 
 #[cfg(test)]

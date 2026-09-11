@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use crate::config::{Config, HookContext, run_hooks};
 use crate::git;
 use crate::meta::Meta;
+use crate::note;
+use crate::porcelain;
 use crate::shell;
 
 /// Check if we're in an orphaned worktree and return to main repo if so
@@ -18,7 +20,7 @@ pub fn check_orphaned_worktree() -> Result<bool> {
             let msg = e.to_string();
             if let Some(repo_path) = msg.strip_prefix("ORPHANED_WORKTREE:") {
                 // We're in a deleted worktree - return to main repo
-                eprintln!(
+                note!(
                     "{}",
                     "⚠️  Current worktree was removed. Returning to main repo...".yellow()
                 );
@@ -34,6 +36,13 @@ pub fn check_orphaned_worktree() -> Result<bool> {
 
 /// Go to worktree interactively using fzf
 pub fn go_interactive() -> Result<()> {
+    // An interactive picker has no meaning for a machine consumer, and fzf
+    // would fight over the terminal. Degrade to a listing so the caller can
+    // choose and then invoke `go <name>` itself.
+    if porcelain::enabled() {
+        return list();
+    }
+
     let repo_root = git::find_repo_root()?;
     let meta = Meta::open(&repo_root)?;
 
@@ -90,8 +99,9 @@ pub fn go(name: &str, base: Option<&str>) -> Result<()> {
     // Check if requesting the primary worktree (main/master branch)
     let main_branch = git::default_branch(&repo_root)?;
     if name == main_branch {
-        eprintln!("{} 📂 Switched to worktree '{}'", "✓".green(), name.cyan());
-        eprintln!("  {}", repo_root.display().to_string().dimmed());
+        note!("{} 📂 Switched to worktree '{}'", "✓".green(), name.cyan());
+        note!("  {}", repo_root.display().to_string().dimmed());
+        emit_wt(&meta, None, &main_branch, &repo_root, true, true, None)?;
         shell::output_cd(&repo_root);
         return Ok(());
     }
@@ -100,19 +110,29 @@ pub fn go(name: &str, base: Option<&str>) -> Result<()> {
     if let Some(id) = meta.find_by_branch_with_context(name, current_id.as_deref())? {
         let wt_path = meta.worktree_path(&id);
         if wt_path.exists() {
-            eprintln!("{} 📂 Switched to worktree '{}'", "✓".green(), name.cyan());
-            eprintln!("  {}", wt_path.display().to_string().dimmed());
+            note!("{} 📂 Switched to worktree '{}'", "✓".green(), name.cyan());
+            note!("  {}", wt_path.display().to_string().dimmed());
+            emit_wt(
+                &meta,
+                Some(&id),
+                name,
+                &wt_path,
+                false,
+                true,
+                Some(&main_branch),
+            )?;
             shell::output_cd(&wt_path);
             return Ok(());
         }
         // Worktree directory missing — fallback to default branch
-        eprintln!(
+        note!(
             "{} Worktree '{}' directory missing, switching to '{}'",
             "⚠".yellow(),
             name.yellow(),
             main_branch.cyan()
         );
-        eprintln!("  {}", repo_root.display().to_string().dimmed());
+        note!("  {}", repo_root.display().to_string().dimmed());
+        emit_wt(&meta, None, &main_branch, &repo_root, true, true, None)?;
         shell::output_cd(&repo_root);
         return Ok(());
     }
@@ -129,9 +149,18 @@ pub fn go(name: &str, base: Option<&str>) -> Result<()> {
     let wt_path = meta.worktree_path(&id);
 
     // Run enter hooks after create (create already ran post-create)
-    eprintln!("{} 📂 Created worktree '{}'", "✓".green(), name.cyan());
-    eprintln!("  {}", wt_path.display().to_string().dimmed());
+    note!("{} 📂 Created worktree '{}'", "✓".green(), name.cyan());
+    note!("  {}", wt_path.display().to_string().dimmed());
 
+    emit_wt(
+        &meta,
+        Some(&id),
+        name,
+        &wt_path,
+        false,
+        true,
+        Some(&main_branch),
+    )?;
     shell::output_cd(&wt_path);
     Ok(())
 }
@@ -159,7 +188,18 @@ pub fn add(name: &str, base: Option<&str>) -> Result<()> {
     let id = create_worktree(&repo_root, &meta, name, base, parent_id)?;
     let wt_path = meta.worktree_path(&id);
 
-    eprintln!("Created worktree '{}' at {}", name, wt_path.display());
+    note!("Created worktree '{}' at {}", name, wt_path.display());
+
+    let default_branch = git::default_branch(&repo_root).unwrap_or_else(|_| "main".to_string());
+    emit_wt(
+        &meta,
+        Some(&id),
+        name,
+        &wt_path,
+        false,
+        false,
+        Some(&default_branch),
+    )?;
     Ok(())
 }
 
@@ -204,11 +244,15 @@ pub fn rm(name: &str, force: bool) -> Result<()> {
 
     // Run pre-remove hooks (can abort)
     if !config.hooks.pre_remove.is_empty() {
-        eprintln!("  {}", "Running pre-remove hooks...".dimmed());
+        note!("  {}", "Running pre-remove hooks...".dimmed());
         run_hooks(&config.hooks.pre_remove, &hook_ctx)?;
     }
 
-    eprintln!(
+    // Children are silently promoted to top level rather than cascade-deleted,
+    // so capture them before the parent row disappears.
+    let orphaned = meta.children(&id)?;
+
+    note!(
         "{}",
         format!("🗑️  Removing worktree '{}'...", name.cyan().bold()).yellow()
     );
@@ -226,10 +270,15 @@ pub fn rm(name: &str, force: bool) -> Result<()> {
     // Remove from metadata
     meta.remove_worktree(&id)?;
 
-    eprintln!(
+    note!(
         "{}",
         format!("✓ Removed worktree '{}'", name.cyan()).green()
     );
+
+    porcelain::record(&["removed", &id, name, "explicit"]);
+    for (child_id, child) in &orphaned {
+        porcelain::record(&["orphaned", child_id, &child.branch]);
+    }
 
     // If we were inside the removed worktree, cd to main repo
     if removing_current {
@@ -240,20 +289,331 @@ pub fn rm(name: &str, force: bool) -> Result<()> {
 }
 
 /// List worktrees
+/// A single row in the worktree listing.
+///
+/// Collected once, then consumed by either the pretty renderer or the
+/// porcelain emitter. Keeping collection separate matters because gathering a
+/// row costs two `git` invocations (status + ahead/behind); the previous
+/// version duplicated that work across three near-identical loops.
+struct Entry {
+    /// `None` for the primary worktree (the repo root), which has no grove id.
+    id: Option<String>,
+    branch: String,
+    path: PathBuf,
+    parent: Option<String>,
+    is_primary: bool,
+    is_current: bool,
+    is_orphan: bool,
+    status: WorktreeStatus,
+    /// Ref that `ahead`/`behind` were measured against, if any.
+    cmp_base: Option<String>,
+    /// Nesting depth; 0 for top level.
+    depth: usize,
+    /// Whether this entry has children in the tree.
+    has_children: bool,
+    /// Whether this is the last sibling at its level (drives tree connectors).
+    is_last: bool,
+}
+
+impl Entry {
+    /// Flag characters for porcelain output. See SPEC.md.
+    fn flags(&self) -> String {
+        let mut flags = String::new();
+        if self.is_primary {
+            flags.push('p');
+        }
+        if self.is_current {
+            flags.push('c');
+        }
+        if self.status.has_modified {
+            flags.push('m');
+        }
+        if self.status.has_untracked {
+            flags.push('u');
+        }
+        if !self.status.dir_exists {
+            flags.push('x');
+        }
+        if self.is_orphan {
+            flags.push('o');
+        }
+        if flags.is_empty() {
+            porcelain::NONE.to_string()
+        } else {
+            flags
+        }
+    }
+}
+
+/// Gather status for one worktree.
+fn collect_status(
+    path: &Path,
+    branch: &str,
+    compare_to: Option<&str>,
+    dir_exists: bool,
+) -> (WorktreeStatus, Option<String>) {
+    let (has_modified, has_untracked) = git::worktree_status(path).unwrap_or((false, false));
+    let (ahead, behind, cmp_base) =
+        git::ahead_behind_against(path, branch, compare_to).unwrap_or((0, 0, None));
+    (
+        WorktreeStatus {
+            has_modified,
+            has_untracked,
+            ahead,
+            behind,
+            dir_exists,
+        },
+        cmp_base,
+    )
+}
+
+/// Recursively collect a worktree's children into `out`.
+fn collect_children(
+    meta: &Meta,
+    parent_id: &str,
+    parent_branch: &str,
+    current_id: Option<&str>,
+    is_orphan: bool,
+    depth: usize,
+    out: &mut Vec<Entry>,
+) -> Result<()> {
+    let children = meta.children(parent_id)?;
+    let count = children.len();
+
+    for (i, (child_id, child_info)) in children.iter().enumerate() {
+        let path = meta.worktree_path(child_id);
+        let has_children = !meta.children(child_id)?.is_empty();
+        // Children compare against their parent's branch, not the default
+        // branch - a child is "ahead" relative to where it forked from.
+        let (status, cmp_base) = collect_status(
+            &path,
+            &child_info.branch,
+            Some(parent_branch),
+            path.exists(),
+        );
+
+        out.push(Entry {
+            id: Some(child_id.clone()),
+            branch: child_info.branch.clone(),
+            path,
+            parent: Some(parent_id.to_string()),
+            is_primary: false,
+            is_current: current_id == Some(child_id.as_str()),
+            is_orphan,
+            status,
+            cmp_base,
+            depth,
+            has_children,
+            is_last: i == count - 1,
+        });
+
+        collect_children(
+            meta,
+            child_id,
+            &child_info.branch,
+            current_id,
+            is_orphan,
+            depth + 1,
+            out,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Collect every row of the listing, in display order.
+///
+/// Returns `(entries, orphan_start)` where `orphan_start` is the index at which
+/// orphaned worktrees begin; the pretty renderer draws a visual break there.
+fn collect_entries(
+    repo_root: &Path,
+    meta: &Meta,
+    current_id: Option<&str>,
+    default_branch: &str,
+) -> Result<(Vec<Entry>, usize)> {
+    let mut entries = Vec::new();
+
+    let top_level = meta.top_level()?;
+    let orphans = meta.orphans()?;
+
+    // Primary worktree (repo root). It always exists and always compares
+    // against its own upstream, if any.
+    let (status, cmp_base) = collect_status(repo_root, default_branch, None, true);
+    entries.push(Entry {
+        id: None,
+        branch: default_branch.to_string(),
+        path: repo_root.to_path_buf(),
+        parent: None,
+        is_primary: true,
+        is_current: current_id.is_none(),
+        is_orphan: false,
+        status,
+        cmp_base,
+        depth: 0,
+        has_children: false, // main has no children in our model
+        is_last: top_level.is_empty() && orphans.is_empty(),
+    });
+
+    let top_count = top_level.len();
+    for (i, (id, info)) in top_level.iter().enumerate() {
+        let path = meta.worktree_path(id);
+        let has_children = !meta.children(id)?.is_empty();
+        let (status, cmp_base) =
+            collect_status(&path, &info.branch, Some(default_branch), path.exists());
+
+        entries.push(Entry {
+            id: Some(id.clone()),
+            branch: info.branch.clone(),
+            path,
+            parent: None,
+            is_primary: false,
+            is_current: current_id == Some(id.as_str()),
+            is_orphan: false,
+            status,
+            cmp_base,
+            depth: 0,
+            has_children,
+            is_last: i == top_count - 1 && orphans.is_empty(),
+        });
+
+        collect_children(meta, id, &info.branch, current_id, false, 1, &mut entries)?;
+    }
+
+    let orphan_start = entries.len();
+
+    // Orphans have no surviving parent to compare against, so they fall back to
+    // upstream only.
+    for (i, (id, info, depth)) in orphans.iter().enumerate() {
+        let path = meta.worktree_path(id);
+        let has_children = !meta.children(id)?.is_empty();
+        let (status, cmp_base) = collect_status(&path, &info.branch, None, path.exists());
+
+        entries.push(Entry {
+            id: Some(id.clone()),
+            branch: info.branch.clone(),
+            path,
+            // The dangling parent id is retained: it is what makes this an
+            // orphan, and consumers may want to show the lost relationship.
+            parent: meta.parent_of(id)?,
+            is_primary: false,
+            is_current: current_id == Some(id.as_str()),
+            is_orphan: true,
+            status,
+            cmp_base,
+            depth: depth.saturating_sub(1),
+            has_children,
+            is_last: i == orphans.len() - 1,
+        });
+
+        collect_children(
+            meta,
+            id,
+            &info.branch,
+            current_id,
+            true,
+            depth.saturating_sub(1) + 1,
+            &mut entries,
+        )?;
+    }
+
+    Ok((entries, orphan_start))
+}
+
+/// Emit a single `wt` record for a worktree acted on by a command, so callers
+/// of `add`/`go` get the same fields they would from `list` without a second
+/// invocation.
+fn emit_wt(
+    meta: &Meta,
+    id: Option<&str>,
+    branch: &str,
+    path: &Path,
+    is_primary: bool,
+    is_current: bool,
+    compare_to: Option<&str>,
+) -> Result<()> {
+    if !porcelain::enabled() {
+        return Ok(());
+    }
+
+    let (status, cmp_base) = collect_status(path, branch, compare_to, path.exists());
+    let parent = match id {
+        Some(id) => meta.parent_of(id)?,
+        None => None,
+    };
+
+    let entry = Entry {
+        id: id.map(String::from),
+        branch: branch.to_string(),
+        path: path.to_path_buf(),
+        parent,
+        is_primary,
+        is_current,
+        is_orphan: false,
+        status,
+        cmp_base,
+        depth: 0,
+        has_children: false,
+        is_last: true,
+    };
+
+    porcelain::record(&[
+        "wt",
+        entry.id.as_deref().unwrap_or(porcelain::NONE),
+        &entry.branch,
+        &entry.path.display().to_string(),
+        entry.parent.as_deref().unwrap_or(porcelain::NONE),
+        &entry.flags(),
+        &entry.status.ahead.to_string(),
+        &entry.status.behind.to_string(),
+        entry.cmp_base.as_deref().unwrap_or(porcelain::NONE),
+    ]);
+
+    Ok(())
+}
+
+/// Emit a listing as porcelain records.
+fn emit_listing(repo_root: &Path, default_branch: &str, entries: &[Entry]) {
+    porcelain::record(&["repo", &repo_root.display().to_string(), default_branch]);
+
+    for e in entries {
+        porcelain::record(&[
+            "wt",
+            e.id.as_deref().unwrap_or(porcelain::NONE),
+            &e.branch,
+            &e.path.display().to_string(),
+            e.parent.as_deref().unwrap_or(porcelain::NONE),
+            &e.flags(),
+            &e.status.ahead.to_string(),
+            &e.status.behind.to_string(),
+            e.cmp_base.as_deref().unwrap_or(porcelain::NONE),
+        ]);
+    }
+}
+
+/// List worktrees
 pub fn list() -> Result<()> {
     use colored::Colorize;
 
     let repo_root = git::find_repo_root()?;
     let meta = Meta::open(&repo_root)?;
     let current_id = current_worktree_id(&repo_root)?;
+    let default_branch = git::default_branch(&repo_root).unwrap_or_else(|_| "main".to_string());
+
+    let (entries, orphan_start) =
+        collect_entries(&repo_root, &meta, current_id.as_deref(), &default_branch)?;
+
+    if porcelain::enabled() {
+        emit_listing(&repo_root, &default_branch, &entries);
+        return Ok(());
+    }
 
     // Header
-    eprintln!("{}", "🌳 Git Worktrees".bold());
-    eprintln!(
+    note!("{}", "🌳 Git Worktrees".bold());
+    note!(
         "{}",
         "────────────────────────────────────────────────────────────────".bright_black()
     );
-    eprintln!();
+    note!();
 
     // Get repo name from path
     let repo_name = repo_root
@@ -261,144 +621,60 @@ pub fn list() -> Result<()> {
         .and_then(|n| n.to_str())
         .unwrap_or("repo");
 
-    eprintln!(
+    note!(
         "📁 {} ({})",
         repo_name.bold().white(),
         repo_root.display().to_string().bright_black()
     );
 
-    // Collect all entries: main + worktrees
-    let main_branch = git::default_branch(&repo_root).unwrap_or_else(|_| "main".to_string());
-    let top_level = meta.top_level()?;
-    let orphans = meta.orphans()?;
-
-    // Print main worktree (repo root) - primary gets green marker
-    let is_main_current = current_id.is_none();
-    let main_is_last = top_level.is_empty() && orphans.is_empty();
-    let main_has_children = false; // main worktree doesn't have children in our model
-
-    // Get status for main worktree
-    let (main_modified, main_untracked) =
-        git::worktree_status(&repo_root).unwrap_or((false, false));
-    let (main_ahead, main_behind) =
-        git::ahead_behind(&repo_root, &main_branch, None).unwrap_or((0, 0));
-    let main_status = WorktreeStatus {
-        has_modified: main_modified,
-        has_untracked: main_untracked,
-        ahead: main_ahead,
-        behind: main_behind,
-        dir_exists: true, // main repo always exists
-    };
-
-    print_worktree_entry(
-        &main_branch,
-        &repo_root,
-        is_main_current,
-        main_is_last,
-        main_has_children,
-        "",
-        false,
-        &main_status,
-    );
-
-    // Print top-level worktrees
-    let top_count = top_level.len();
-    for (i, (id, info)) in top_level.iter().enumerate() {
-        let is_last = i == top_count - 1 && orphans.is_empty();
-        let wt_path = meta.worktree_path(id);
-        let is_current = current_id.as_deref() == Some(id.as_str());
-        let has_children = !meta.children(id)?.is_empty();
-
-        // Get status
-        let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
-        let (ahead, behind) =
-            git::ahead_behind(&wt_path, &info.branch, Some(&main_branch)).unwrap_or((0, 0));
-        let status = WorktreeStatus {
-            has_modified: modified,
-            has_untracked: untracked,
-            ahead,
-            behind,
-            dir_exists: wt_path.exists(),
-        };
-
-        print_worktree_entry(
-            &info.branch,
-            &wt_path,
-            is_current,
-            is_last,
-            has_children,
-            "",
-            false,
-            &status,
-        );
-
-        // Children are indented 3 spaces from parent's connector
-        // Use │ continuation only if parent is not last sibling
-        let child_prefix = if is_last { "   " } else { "│  " };
-        print_worktree_children(
-            &meta,
-            id,
-            &info.branch,
-            current_id.as_deref(),
-            child_prefix,
-            false,
-        )?;
-    }
-
-    // Print orphaned worktrees (parent was deleted) - separate section
-    if !orphans.is_empty() {
-        // Visual break before orphans
-        eprintln!("{}", "┊".truecolor(120, 100, 140));
-    }
-    for (i, (id, info, depth)) in orphans.iter().enumerate() {
-        let is_last = i == orphans.len() - 1;
-        let wt_path = meta.worktree_path(id);
-        let is_current = current_id.as_deref() == Some(id.as_str());
-        let has_children = !meta.children(id)?.is_empty();
-
-        // Orphans only compare to upstream (no parent to compare to)
-        let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
-        let (ahead, behind) = git::ahead_behind(&wt_path, &info.branch, None).unwrap_or((0, 0));
-        let status = WorktreeStatus {
-            has_modified: modified,
-            has_untracked: untracked,
-            ahead,
-            behind,
-            dir_exists: wt_path.exists(),
-        };
-
-        // Indent based on depth (how deep in the tree they were)
-        let orphan_prefix = "   ".repeat(depth.saturating_sub(1));
-        print_orphan_entry(
-            &info.branch,
-            &wt_path,
-            is_current,
-            is_last,
-            has_children,
-            &orphan_prefix,
-            &status,
-        );
-
-        // Children of orphans use normal tree display (3-char indent, matching regular tree)
-        let child_prefix = format!("{}{}", orphan_prefix, if is_last { "   " } else { "│  " });
-        print_worktree_children(
-            &meta,
-            id,
-            &info.branch,
-            current_id.as_deref(),
-            &child_prefix,
-            true,
-        )?;
-    }
+    render_entries(&entries, orphan_start);
 
     // Footer suggestion
-    eprintln!();
-    eprintln!(
+    note!();
+    note!(
         "{}",
         "💡 Use 'grove go <name>' to switch, 'grove rm <name>' to remove".bright_blue()
     );
 
     Ok(())
+}
+
+/// Render collected entries as the human-facing tree.
+///
+/// Tree prefixes are rebuilt from each entry's depth and last-sibling flag. A
+/// stack of "does this ancestor level still have siblings below it" decides
+/// whether to draw a continuation bar.
+fn render_entries(entries: &[Entry], orphan_start: usize) {
+    use colored::Colorize;
+
+    // continuation[d] == true means depth d still has siblings to come, so
+    // deeper rows draw a `│` at that column.
+    let mut continuation: Vec<bool> = Vec::new();
+
+    for (i, e) in entries.iter().enumerate() {
+        if i == orphan_start && orphan_start < entries.len() {
+            // Visual break before orphans
+            note!("{}", "┊".truecolor(120, 100, 140));
+        }
+
+        continuation.truncate(e.depth);
+        let mut prefix = String::new();
+        for has_more in &continuation {
+            prefix.push_str(if *has_more { "│  " } else { "   " });
+        }
+        continuation.push(!e.is_last);
+
+        print_worktree_entry(
+            &e.branch,
+            &e.path,
+            e.is_current,
+            e.is_last,
+            e.has_children,
+            &prefix,
+            e.is_orphan,
+            &e.status,
+        );
+    }
 }
 
 /// Status information for a worktree
@@ -463,7 +739,7 @@ fn print_worktree_entry(
         String::new()
     };
 
-    eprintln!(
+    note!(
         "{}{} {} {}{}",
         prefix.truecolor(tree_color.0, tree_color.1, tree_color.2),
         connector.truecolor(tree_color.0, tree_color.1, tree_color.2),
@@ -501,7 +777,7 @@ fn print_worktree_entry(
         format!("{} · ", status_parts.join(" "))
     };
 
-    eprintln!(
+    note!(
         "{}{}{}{}",
         prefix.truecolor(tree_color.0, tree_color.1, tree_color.2),
         path_prefix.truecolor(tree_color.0, tree_color.1, tree_color.2),
@@ -510,92 +786,15 @@ fn print_worktree_entry(
     );
 }
 
-/// Print an orphaned worktree entry with broken connector
-fn print_orphan_entry(
-    name: &str,
-    path: &std::path::Path,
-    is_current: bool,
-    is_last: bool,
-    has_children: bool,
-    prefix: &str,
-    status: &WorktreeStatus,
-) {
-    // Reuse print_worktree_entry with is_orphan=true
-    print_worktree_entry(
-        name,
-        path,
-        is_current,
-        is_last,
-        has_children,
-        prefix,
-        true,
-        status,
-    );
-}
-
-fn print_worktree_children(
-    meta: &Meta,
-    parent_id: &str,
-    parent_branch: &str,
-    current_id: Option<&str>,
-    prefix: &str,
-    is_orphan: bool,
-) -> Result<()> {
-    let children = meta.children(parent_id)?;
-    let child_count = children.len();
-
-    for (i, (child_id, child_info)) in children.iter().enumerate() {
-        let is_last = i == child_count - 1;
-        let is_current = current_id == Some(child_id.as_str());
-        let wt_path = meta.worktree_path(child_id);
-        let has_children = !meta.children(child_id)?.is_empty();
-
-        // Get status for this worktree
-        let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
-        let (ahead, behind) =
-            git::ahead_behind(&wt_path, &child_info.branch, Some(parent_branch)).unwrap_or((0, 0));
-        let status = WorktreeStatus {
-            has_modified: modified,
-            has_untracked: untracked,
-            ahead,
-            behind,
-            dir_exists: wt_path.exists(),
-        };
-
-        print_worktree_entry(
-            &child_info.branch,
-            &wt_path,
-            is_current,
-            is_last,
-            has_children,
-            prefix,
-            is_orphan,
-            &status,
-        );
-
-        // Recurse for nested children - 3 char indent
-        let next_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
-        print_worktree_children(
-            meta,
-            child_id,
-            &child_info.branch,
-            current_id,
-            &next_prefix,
-            is_orphan,
-        )?;
-    }
-
-    Ok(())
-}
-
 /// Clean stale worktree references
 pub fn prune() -> Result<()> {
     use colored::Colorize;
 
     let repo_root = git::find_repo_root()?;
-    eprintln!("{}", "🧹 Pruning stale worktree references...".yellow());
+    note!("{}", "🧹 Pruning stale worktree references...".yellow());
     git::worktree_prune(&repo_root)?;
-    eprintln!("{}", "✓ Pruned".green());
+    note!("{}", "✓ Pruned".green());
+    porcelain::record(&["pruned"]);
     Ok(())
 }
 
@@ -610,15 +809,27 @@ pub fn sync() -> Result<()> {
     let git_worktrees = git::worktree_list(&repo_root)?;
 
     // Sync
-    let (imported, removed) = meta.sync(&git_worktrees)?;
+    let report = meta.sync(&git_worktrees)?;
 
-    if imported > 0 || removed > 0 {
-        eprintln!(
+    if !report.imported.is_empty() || !report.removed.is_empty() {
+        note!(
             "{}",
-            format!("✓ Synced: {} imported, {} removed", imported, removed).green()
+            format!(
+                "✓ Synced: {} imported, {} removed",
+                report.imported.len(),
+                report.removed.len()
+            )
+            .green()
         );
     } else {
-        eprintln!("{}", "✓ Already in sync".green());
+        note!("{}", "✓ Already in sync".green());
+    }
+
+    for (id, info) in &report.imported {
+        porcelain::record(&["imported", id, &info.branch]);
+    }
+    for (id, branch) in &report.removed {
+        porcelain::record(&["removed", id, branch, "stale"]);
     }
 
     Ok(())
@@ -653,10 +864,11 @@ pub fn clean(target_branch: Option<&str>) -> Result<()> {
             // Check for uncommitted changes
             let (modified, untracked) = git::worktree_status(&wt_path).unwrap_or((false, false));
             if wt_path.exists() && (modified || untracked) {
-                eprintln!(
+                note!(
                     "{}",
                     format!("⚠ Skipping '{}': has uncommitted changes", info.branch).yellow()
                 );
+                porcelain::record(&["skipped", &id, &info.branch, "dirty"]);
                 skipped += 1;
                 continue;
             }
@@ -667,7 +879,7 @@ pub fn clean(target_branch: Option<&str>) -> Result<()> {
             }
 
             // Remove the worktree
-            eprintln!(
+            note!(
                 "{}",
                 format!(
                     "✓ Removing '{}' (merged into {})",
@@ -687,14 +899,20 @@ pub fn clean(target_branch: Option<&str>) -> Result<()> {
             // but git -d doesn't recognize squash merges as merged
             git::branch_delete(&repo_root, &info.branch, true)?;
             meta.remove(&id)?;
+            porcelain::record(&[
+                "removed",
+                &id,
+                &info.branch,
+                &format!("merged:{}", check_against),
+            ]);
             removed += 1;
         }
     }
 
     if removed == 0 && skipped == 0 {
-        eprintln!("{}", "✓ No merged worktrees to clean".green());
+        note!("{}", "✓ No merged worktrees to clean".green());
     } else {
-        eprintln!(
+        note!(
             "{}",
             format!(
                 "✓ Cleaned {} worktree(s){}",
@@ -727,15 +945,17 @@ pub fn done() -> Result<()> {
     env::set_current_dir(&repo_root)?;
 
     // Fetch all remotes (updates tracking branches for merge detection)
-    eprintln!("{}", "⟳ Fetching all remotes...".cyan());
+    note!("{}", "⟳ Fetching all remotes...".cyan());
     git::fetch_all(&repo_root)?;
+    porcelain::record(&["fetched"]);
 
     // Pull latest on main
-    eprintln!("{}", "⟳ Pulling latest...".cyan());
+    note!("{}", "⟳ Pulling latest...".cyan());
     git::pull(&repo_root)?;
+    porcelain::record(&["pulled"]);
 
     // Clean merged worktrees
-    eprintln!("{}", "⟳ Cleaning merged worktrees...".cyan());
+    note!("{}", "⟳ Cleaning merged worktrees...".cyan());
     clean(None)?;
 
     // cd to main
@@ -762,20 +982,21 @@ pub fn pull(paths: &[String]) -> Result<()> {
     let dest = &current_wt;
 
     if paths.is_empty() {
-        eprintln!("{}", "📥 Pulling ignored files from main...".cyan());
+        note!("{}", "📥 Pulling ignored files from main...".cyan());
     } else {
-        eprintln!("{} {}", "📥 Pulling from main:".cyan(), paths.join(", "));
+        note!("{} {}", "📥 Pulling from main:".cyan(), paths.join(", "));
     }
 
     let (report, files) = crate::copyfiles::sync_ignored(src, dest, paths)?;
 
     if !files.is_empty() {
         for line in summarize_files(&files) {
-            eprintln!("  {}", line.dimmed());
+            note!("  {}", line.dimmed());
         }
     }
 
-    eprintln!("{}", format!("✓ Pulled {} file(s)", report.copied).green());
+    note!("{}", format!("✓ Pulled {} file(s)", report.copied).green());
+    emit_copy_report(&report);
     warn_copy_failures(&report);
     Ok(())
 }
@@ -799,20 +1020,21 @@ pub fn push(paths: &[String]) -> Result<()> {
     let dest = &repo_root;
 
     if paths.is_empty() {
-        eprintln!("{}", "📤 Pushing ignored files to main...".cyan());
+        note!("{}", "📤 Pushing ignored files to main...".cyan());
     } else {
-        eprintln!("{} {}", "📤 Pushing to main:".cyan(), paths.join(", "));
+        note!("{} {}", "📤 Pushing to main:".cyan(), paths.join(", "));
     }
 
     let (report, files) = crate::copyfiles::sync_ignored(src, dest, paths)?;
 
     if !files.is_empty() {
         for line in summarize_files(&files) {
-            eprintln!("  {}", line.dimmed());
+            note!("  {}", line.dimmed());
         }
     }
 
-    eprintln!("{}", format!("✓ Pushed {} file(s)", report.copied).green());
+    note!("{}", format!("✓ Pushed {} file(s)", report.copied).green());
+    emit_copy_report(&report);
     warn_copy_failures(&report);
     Ok(())
 }
@@ -827,7 +1049,11 @@ pub fn path(name: &str) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Worktree '{}' not found", name))?;
 
     let wt_path = meta.worktree_path(&id);
-    println!("{}", wt_path.display());
+    if porcelain::enabled() {
+        porcelain::record(&["path", &wt_path.display().to_string()]);
+    } else {
+        println!("{}", wt_path.display());
+    }
     Ok(())
 }
 
@@ -873,11 +1099,11 @@ fn create_worktree(
     };
 
     // Create the git worktree
-    eprintln!(
+    note!(
         "{}",
         format!("🌱 Creating worktree '{}'...", branch.cyan().bold()).yellow()
     );
-    eprintln!("  {}", format!("Base: {}", base_branch).dimmed());
+    note!("  {}", format!("Base: {}", base_branch).dimmed());
 
     if let Err(e) = git::worktree_add(repo_root, &wt_path, branch, &base_branch) {
         // Rollback metadata on failure
@@ -887,7 +1113,7 @@ fn create_worktree(
 
     // Ensure git hooks work in worktrees
     if git::ensure_hooks_path(repo_root)? {
-        eprintln!(
+        note!(
             "  {}",
             "Configured core.hooksPath for worktree hooks".dimmed()
         );
@@ -907,25 +1133,26 @@ fn create_worktree(
 
     if !files.is_empty() {
         let summary = summarize_files(&files);
-        eprintln!("  {}", format!("Copying {} files...", files.len()).dimmed());
+        note!("  {}", format!("Copying {} files...", files.len()).dimmed());
         for line in &summary {
-            eprintln!("    {}", line.dimmed());
+            note!("    {}", line.dimmed());
         }
 
         let report = crate::copyfiles::copy_files_parallel(&files, repo_root, &wt_path)?;
         if report.copied > 0 {
-            eprintln!("  {}", format!("✓ Copied {} files", report.copied).dimmed());
+            note!("  {}", format!("✓ Copied {} files", report.copied).dimmed());
         }
         warn_copy_failures(&report);
     }
 
     // Run post-create hooks
     if !config.hooks.post_create.is_empty() {
-        eprintln!("  {}", "Running post-create hooks...".dimmed());
+        note!("  {}", "Running post-create hooks...".dimmed());
         run_hooks(&config.hooks.post_create, &hook_ctx)?;
     }
 
-    eprintln!("{}", "✓ 🌳 Worktree created!".green());
+    note!("{}", "✓ 🌳 Worktree created!".green());
+    porcelain::record(&["created", &id, branch, &wt_path.display().to_string()]);
     Ok(id)
 }
 
@@ -988,6 +1215,14 @@ fn summarize_files(files: &[String]) -> Vec<String> {
     result
 }
 
+/// Emit copy results as porcelain records.
+fn emit_copy_report(report: &crate::copyfiles::CopyReport) {
+    porcelain::record(&["copied", &report.copied.to_string()]);
+    for (path, err) in &report.failed {
+        porcelain::record(&["copyfail", path, &err.to_string()]);
+    }
+}
+
 /// Warn about files that could not be copied
 ///
 /// A partial copy is recoverable - the worktree is still usable - so this warns
@@ -999,17 +1234,17 @@ fn warn_copy_failures(report: &crate::copyfiles::CopyReport) {
         return;
     }
 
-    eprintln!(
+    note!(
         "{}",
         format!("⚠ {} file(s) could not be copied", report.failed.len()).yellow()
     );
 
     for (path, err) in report.failed.iter().take(5) {
-        eprintln!("    {}", format!("{}: {}", path, err).dimmed());
+        note!("    {}", format!("{}: {}", path, err).dimmed());
     }
 
     if report.failed.len() > 5 {
-        eprintln!(
+        note!(
             "    {}",
             format!("+ {} more", report.failed.len() - 5).dimmed()
         );

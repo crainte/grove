@@ -129,6 +129,78 @@ __grove_cd:/path/to/worktree
 
 The shell wrapper intercepts this and runs `cd`. All other output passes through.
 
+## Porcelain Output
+
+`--porcelain` is a global flag that swaps the decorated rendering for
+tab-separated records on **stdout**. It is a stable protocol: changing a
+record's arity or field order is a breaking change.
+
+Fields are escaped so a value can never introduce a field or record boundary:
+`\` → `\\`, tab → `\t`, newline → `\n`, carriage return → `\r`. Absent
+optional fields are `-`.
+
+Errors go to stderr as `error\t<message>` with a nonzero exit; stdout stays
+empty so a failed command never yields a half-parsed stream.
+
+### Records
+
+```
+repo      <root-abspath>  <default-branch>
+wt        <id>  <branch>  <abspath>  <parent-id>  <flags>  <ahead>  <behind>  <cmp-base>
+cd        <abspath>
+created   <id>  <branch>  <abspath>
+removed   <id>  <branch>  <reason>          # explicit | merged:<ref> | stale
+orphaned  <id>  <branch>
+skipped   <id>  <branch>  <reason>          # dirty
+imported  <id>  <branch>
+pruned
+fetched
+pulled
+copied    <count>
+copyfail  <relpath>  <reason>
+path      <abspath>
+```
+
+`id` is `-` for the primary worktree; `parent-id` is `-` at top level.
+
+`cmp-base` is the ref `ahead`/`behind` were measured against. It is not implied
+by position: an upstream tracking branch wins if one exists, otherwise a child
+compares against its parent's branch and a top-level worktree against the
+default branch. Bare counts are ambiguous without it.
+
+### Flags
+
+| Char | Meaning |
+|------|---------|
+| `p` | Primary worktree (repo root) |
+| `c` | Current (cwd is inside it) |
+| `m` | Has modified tracked files |
+| `u` | Has untracked files |
+| `x` | Directory missing on disk |
+| `o` | Orphan (parent was deleted) |
+
+`-` when no flags apply.
+
+### Per-command output
+
+| Command | Records |
+|---------|---------|
+| `list` | `repo`, then `wt`* in tree order |
+| `add` | `created`, `wt` |
+| `go` | `wt`, `cd` — plus `created` if the worktree was new |
+| `go` (no name) | Degrades to `list`; no fzf, no `cd` |
+| `rm` | `removed`, `orphaned`*, `cd` if the cwd was inside it |
+| `clean` | `removed`*, `skipped`*, `cd` if the current worktree went |
+| `done` | `fetched`, `pulled`, then `clean` records, `cd` |
+| `prune` | `pruned` |
+| `sync` | `imported`*, `removed`* |
+| `pull` / `push` | `copied`, `copyfail`* |
+| `path` | `path` |
+| `init`, `complete` | Flag ignored; already machine output |
+
+In porcelain mode `cd` replaces the `__grove_cd:` prefix, so consumers parse one
+format rather than special-casing the shell protocol.
+
 ## ID Generation
 
 Short incrementing base36 IDs: `1`, `2`, ... `a`, `b`, ... `z`, `10`, `11`, ...

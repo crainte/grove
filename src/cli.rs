@@ -23,6 +23,10 @@ pub struct Cli {
     #[arg(short = 'C', global = true, value_name = "PATH")]
     pub directory: Option<PathBuf>,
 
+    /// Emit machine-readable TSV records on stdout (see SPEC.md)
+    #[arg(long, global = true)]
+    pub porcelain: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 

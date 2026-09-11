@@ -1798,3 +1798,646 @@ fn test_dash_c_with_invalid_path() {
         .failure()
         .stderr(predicate::str::contains("Failed to change to"));
 }
+
+// =============================================================================
+// PORCELAIN OUTPUT TESTS
+// =============================================================================
+
+/// Parse porcelain stdout into records: `Vec<Vec<String>>`, one inner vec per
+/// line, fields already unescaped.
+fn parse_porcelain(stdout: &str) -> Vec<Vec<String>> {
+    stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|line| {
+            line.split('\t')
+                .map(|f| {
+                    // Reverse the escaping applied by porcelain::escape
+                    let mut out = String::new();
+                    let mut chars = f.chars();
+                    while let Some(c) = chars.next() {
+                        if c == '\\' {
+                            match chars.next() {
+                                Some('t') => out.push('\t'),
+                                Some('n') => out.push('\n'),
+                                Some('\\') => out.push('\\'),
+                                Some(other) => {
+                                    out.push('\\');
+                                    out.push(other);
+                                }
+                                None => out.push('\\'),
+                            }
+                        } else {
+                            out.push(c);
+                        }
+                    }
+                    out
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Run grove with --porcelain and return parsed stdout records
+fn porcelain_records(repo_dir: &std::path::Path, args: &[&str]) -> Vec<Vec<String>> {
+    let output = grove()
+        .arg("--porcelain")
+        .args(args)
+        .current_dir(repo_dir)
+        .output()
+        .unwrap();
+    parse_porcelain(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Find the first record of a given type
+fn find_record<'a>(records: &'a [Vec<String>], kind: &str) -> Option<&'a Vec<String>> {
+    records
+        .iter()
+        .find(|r| r.first().map(String::as_str) == Some(kind))
+}
+
+/// Find all records of a given type
+fn find_records<'a>(records: &'a [Vec<String>], kind: &str) -> Vec<&'a Vec<String>> {
+    records
+        .iter()
+        .filter(|r| r.first().map(String::as_str) == Some(kind))
+        .collect()
+}
+
+/// Locate the `wt` record for a given branch
+fn find_wt<'a>(records: &'a [Vec<String>], branch: &str) -> Option<&'a Vec<String>> {
+    records.iter().find(|r| {
+        r.first().map(String::as_str) == Some("wt") && r.get(2).map(String::as_str) == Some(branch)
+    })
+}
+
+#[test]
+fn test_porcelain_list_emits_repo_and_wt_records() {
+    let repo = setup_git_repo();
+
+    let records = porcelain_records(repo.path(), &["list"]);
+
+    let repo_rec = find_record(&records, "repo").expect("expected a repo record");
+    assert_eq!(
+        repo_rec.len(),
+        3,
+        "repo record: repo\\t<root>\\t<default-branch>"
+    );
+    assert_eq!(repo_rec[2], "main");
+
+    let main_wt = find_wt(&records, "main").expect("expected a wt record for main");
+    assert_eq!(main_wt.len(), 9, "wt record has 9 fields");
+    assert_eq!(main_wt[1], "-", "primary worktree has no id");
+    assert_eq!(main_wt[4], "-", "primary worktree has no parent");
+    assert!(main_wt[5].contains('p'), "primary flag: {}", main_wt[5]);
+    assert!(main_wt[5].contains('c'), "current flag: {}", main_wt[5]);
+}
+
+#[test]
+fn test_porcelain_list_no_ansi_no_emoji() {
+    let repo = setup_git_repo();
+
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let output = grove()
+        .args(["--porcelain", "list"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.is_empty(), "porcelain list must write to stdout");
+    assert!(
+        stdout.is_ascii(),
+        "porcelain output must be pure ASCII, got: {:?}",
+        stdout
+    );
+    assert!(
+        !stdout.contains('\x1b'),
+        "porcelain output must contain no ANSI escapes"
+    );
+
+    // Human decoration must be gone entirely, not just moved
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Git Worktrees"),
+        "porcelain must suppress the pretty header, got: {:?}",
+        stderr
+    );
+}
+
+#[test]
+fn test_porcelain_list_child_reports_parent_id_and_cmp_base() {
+    let repo = setup_git_repo();
+
+    grove()
+        .args(["add", "parent-wt"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let parent_path = repo.path().join(".git/wt/1");
+    grove()
+        .args(["add", "child-wt"])
+        .current_dir(&parent_path)
+        .assert()
+        .success();
+
+    let records = porcelain_records(repo.path(), &["list"]);
+
+    let parent = find_wt(&records, "parent-wt").expect("parent record");
+    let child = find_wt(&records, "child-wt").expect("child record");
+
+    assert_eq!(child[4], parent[1], "child parent-id points at the parent");
+    assert_eq!(
+        child[8], "parent-wt",
+        "child ahead/behind is measured against its parent's branch"
+    );
+    assert_eq!(
+        parent[8], "main",
+        "top-level ahead/behind is measured against the default branch"
+    );
+}
+
+#[test]
+fn test_porcelain_list_marks_dirty_and_missing_flags() {
+    let repo = setup_git_repo();
+
+    grove()
+        .args(["add", "dirty-wt"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let wt_path = repo.path().join(".git/wt/1");
+
+    // Modify a tracked file and add an untracked one
+    fs::write(wt_path.join("README.md"), "# Changed").unwrap();
+    fs::write(wt_path.join("brand-new.txt"), "hello").unwrap();
+
+    let records = porcelain_records(repo.path(), &["list"]);
+    let wt = find_wt(&records, "dirty-wt").expect("dirty-wt record");
+    assert!(wt[5].contains('m'), "modified flag expected in {}", wt[5]);
+    assert!(wt[5].contains('u'), "untracked flag expected in {}", wt[5]);
+
+    // Now delete the directory out from under grove
+    fs::remove_dir_all(&wt_path).unwrap();
+
+    let records = porcelain_records(repo.path(), &["list"]);
+    let wt = find_wt(&records, "dirty-wt").expect("dirty-wt record after deletion");
+    assert!(
+        wt[5].contains('x'),
+        "missing-dir flag expected in {}",
+        wt[5]
+    );
+}
+
+#[test]
+fn test_porcelain_list_marks_orphans() {
+    let repo = setup_git_repo();
+
+    grove()
+        .args(["add", "the-parent"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let parent_path = repo.path().join(".git/wt/1");
+    grove()
+        .args(["add", "the-child"])
+        .current_dir(&parent_path)
+        .assert()
+        .success();
+
+    // Remove the parent; the child is silently orphaned
+    grove()
+        .args(["rm", "the-parent"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let records = porcelain_records(repo.path(), &["list"]);
+    let child = find_wt(&records, "the-child").expect("orphaned child record");
+    assert!(
+        child[5].contains('o'),
+        "orphan flag expected in {}",
+        child[5]
+    );
+}
+
+#[test]
+fn test_porcelain_add_emits_created_and_wt() {
+    let repo = setup_git_repo();
+
+    let records = porcelain_records(repo.path(), &["add", "feature"]);
+
+    let created = find_record(&records, "created").expect("created record");
+    assert_eq!(created.len(), 4, "created\\t<id>\\t<branch>\\t<path>");
+    assert_eq!(created[2], "feature");
+    assert!(created[3].ends_with(".git/wt/1"), "path: {}", created[3]);
+
+    let wt = find_wt(&records, "feature").expect("wt record for the new worktree");
+    assert_eq!(wt[1], created[1], "wt id matches created id");
+}
+
+#[test]
+fn test_porcelain_go_emits_cd_record_not_grove_cd_prefix() {
+    let repo = setup_git_repo();
+
+    let output = grove()
+        .args(["--porcelain", "go", "feature"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("__grove_cd:"),
+        "porcelain mode replaces the shell prefix with a cd record"
+    );
+
+    let records = parse_porcelain(&stdout);
+    let cd = find_record(&records, "cd").expect("cd record");
+    assert_eq!(cd.len(), 2);
+    assert!(cd[1].ends_with(".git/wt/1"), "cd path: {}", cd[1]);
+
+    find_record(&records, "created").expect("go on a new name also emits created");
+}
+
+#[test]
+fn test_porcelain_go_existing_worktree_single_invocation() {
+    let repo = setup_git_repo();
+
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let records = porcelain_records(repo.path(), &["go", "feature"]);
+
+    assert!(
+        find_record(&records, "created").is_none(),
+        "switching to an existing worktree must not report creation"
+    );
+    let cd = find_record(&records, "cd").expect("cd record");
+    assert!(cd[1].ends_with(".git/wt/1"));
+    find_wt(&records, "feature").expect("wt record for the target");
+}
+
+#[test]
+fn test_porcelain_go_without_name_lists_instead_of_fzf() {
+    let repo = setup_git_repo();
+
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let records = porcelain_records(repo.path(), &["go"]);
+
+    find_record(&records, "repo").expect("bare `go` in porcelain mode degrades to a listing");
+    find_wt(&records, "feature").expect("wt record present");
+    assert!(
+        find_record(&records, "cd").is_none(),
+        "no selection was made, so nothing to cd to"
+    );
+}
+
+#[test]
+fn test_porcelain_remove_emits_removed_and_orphaned() {
+    let repo = setup_git_repo();
+
+    grove()
+        .args(["add", "doomed"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let parent_path = repo.path().join(".git/wt/1");
+    grove()
+        .args(["add", "survivor"])
+        .current_dir(&parent_path)
+        .assert()
+        .success();
+
+    let records = porcelain_records(repo.path(), &["rm", "doomed"]);
+
+    let removed = find_record(&records, "removed").expect("removed record");
+    assert_eq!(removed.len(), 4, "removed\\t<id>\\t<branch>\\t<reason>");
+    assert_eq!(removed[2], "doomed");
+    assert_eq!(removed[3], "explicit");
+
+    let orphaned = find_record(&records, "orphaned").expect("orphaned record");
+    assert_eq!(orphaned[2], "survivor");
+}
+
+#[test]
+fn test_porcelain_remove_current_emits_cd() {
+    let repo = setup_git_repo();
+
+    grove()
+        .args(["add", "current-wt"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let wt_path = repo.path().join(".git/wt/1");
+    let records = porcelain_records(&wt_path, &["rm", "current-wt"]);
+
+    let cd = find_record(&records, "cd").expect("cd back to the repo root");
+    assert_eq!(cd[1], repo.path().canonicalize().unwrap().to_string_lossy());
+}
+
+#[test]
+fn test_porcelain_clean_emits_removed_and_skipped() {
+    let repo = setup_git_repo();
+
+    // A merged worktree, ready to be cleaned
+    grove()
+        .args(["add", "merged-wt"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let merged_path = repo.path().join(".git/wt/1");
+    fs::write(merged_path.join("f.txt"), "x").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&merged_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "work"])
+        .current_dir(&merged_path)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["merge", "merged-wt"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    // A second merged worktree that is dirty, so clean must skip it
+    grove()
+        .args(["add", "dirty-wt"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let dirty_path = repo.path().join(".git/wt/2");
+    StdCommand::new("git")
+        .args(["merge", "dirty-wt"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    fs::write(dirty_path.join("README.md"), "# dirty").unwrap();
+
+    let records = porcelain_records(repo.path(), &["clean"]);
+
+    let removed = find_records(&records, "removed");
+    assert!(
+        removed.iter().any(|r| r[2] == "merged-wt"),
+        "merged worktree should be removed: {:?}",
+        records
+    );
+    assert!(
+        removed
+            .iter()
+            .find(|r| r[2] == "merged-wt")
+            .is_some_and(|r| r[3].starts_with("merged:")),
+        "removal reason records the ref it was merged into"
+    );
+
+    let skipped = find_record(&records, "skipped").expect("skipped record for the dirty worktree");
+    assert_eq!(skipped[2], "dirty-wt");
+    assert_eq!(skipped[3], "dirty");
+}
+
+#[test]
+fn test_porcelain_sync_emits_imported() {
+    let repo = setup_git_repo();
+
+    grove()
+        .args(["add", "tracked"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    // Drop the metadata database so sync has to re-import from git
+    fs::remove_file(repo.path().join(".git/wt/grove.db")).unwrap();
+
+    let records = porcelain_records(repo.path(), &["sync"]);
+    let imported = find_record(&records, "imported").expect("imported record");
+    assert_eq!(imported.len(), 3, "imported\\t<id>\\t<branch>");
+    assert_eq!(imported[2], "tracked");
+}
+
+#[test]
+fn test_porcelain_prune_emits_pruned() {
+    let repo = setup_git_repo();
+
+    let records = porcelain_records(repo.path(), &["prune"]);
+    find_record(&records, "pruned").expect("pruned record");
+}
+
+#[test]
+fn test_porcelain_path_emits_path_record() {
+    let repo = setup_git_repo();
+
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let records = porcelain_records(repo.path(), &["path", "feature"]);
+    let path = find_record(&records, "path").expect("path record");
+    assert_eq!(path.len(), 2);
+    assert!(path[1].ends_with(".git/wt/1"), "path: {}", path[1]);
+}
+
+#[test]
+fn test_porcelain_pull_emits_copied() {
+    let repo = setup_git_repo();
+    commit_gitignore(&repo, ".env\n");
+    fs::write(repo.path().join(".env"), "SECRET=1").unwrap();
+
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let wt_path = repo.path().join(".git/wt/1");
+    let records = porcelain_records(&wt_path, &["pull"]);
+
+    let copied = find_record(&records, "copied").expect("copied record");
+    assert_eq!(copied.len(), 2, "copied\\t<count>");
+    assert_eq!(copied[1], "1");
+}
+
+#[test]
+fn test_porcelain_error_goes_to_stderr_as_tsv() {
+    let repo = setup_git_repo();
+
+    let output = grove()
+        .args(["--porcelain", "path", "no-such-worktree"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "missing worktree is an error");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().is_empty(),
+        "errors must not pollute the record stream: {:?}",
+        stdout
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("error\t"),
+        "expected a TSV error record, got: {:?}",
+        stderr
+    );
+    assert!(
+        !stderr.contains('\u{2717}'),
+        "no ✗ decoration in porcelain mode"
+    );
+    assert!(stderr.contains("no-such-worktree"));
+}
+
+#[test]
+fn test_porcelain_escapes_tab_in_repo_path() {
+    // A repo whose path contains a tab would otherwise split a field in two
+    let parent = TempDir::new().unwrap();
+    let repo_dir = parent.path().join("has\ttab");
+    fs::create_dir(&repo_dir).unwrap();
+
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "test@test.com"],
+        vec!["config", "user.name", "Test"],
+    ] {
+        StdCommand::new("git")
+            .args(&args)
+            .current_dir(&repo_dir)
+            .output()
+            .unwrap();
+    }
+    fs::write(repo_dir.join("README.md"), "# Test").unwrap();
+    StdCommand::new("git")
+        .args(["add", "."])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["commit", "-m", "Initial commit"])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
+    StdCommand::new("git")
+        .args(["branch", "-M", "main"])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
+
+    let output = grove()
+        .args(["--porcelain", "list"])
+        .current_dir(&repo_dir)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let repo_line = stdout
+        .lines()
+        .find(|l| l.starts_with("repo\t"))
+        .expect("repo record");
+    assert_eq!(
+        repo_line.split('\t').count(),
+        3,
+        "escaped tab must not create an extra field: {:?}",
+        repo_line
+    );
+
+    let records = parse_porcelain(&stdout);
+    let repo_rec = find_record(&records, "repo").unwrap();
+    assert!(
+        repo_rec[1].contains("has\ttab"),
+        "unescaping round-trips the literal tab: {:?}",
+        repo_rec[1]
+    );
+}
+
+#[test]
+fn test_porcelain_hook_stdout_does_not_pollute_records() {
+    let repo = setup_git_repo();
+
+    fs::write(
+        repo.path().join(".grove.toml"),
+        "[[hooks.post-create]]\nnoisy = \"echo NOT-A-RECORD && echo also\\tnot\"\n",
+    )
+    .unwrap();
+
+    let output = grove()
+        .args(["--porcelain", "add", "feature"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("NOT-A-RECORD"),
+        "hook stdout must not land in the record stream: {:?}",
+        stdout
+    );
+
+    let known = [
+        "repo", "wt", "cd", "created", "removed", "orphaned", "skipped", "imported", "pruned",
+        "fetched", "pulled", "copied", "copyfail", "path",
+    ];
+    for record in parse_porcelain(&stdout) {
+        assert!(
+            known.contains(&record[0].as_str()),
+            "unexpected record type {:?} in {:?}",
+            record[0],
+            stdout
+        );
+    }
+}
+
+#[test]
+fn test_pretty_output_unchanged_without_flag() {
+    let repo = setup_git_repo();
+
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    // The human-facing rendering is untouched by the porcelain work
+    let output = grove()
+        .arg("list")
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("🌳 Git Worktrees"))
+        .stderr(predicate::str::contains("📁"))
+        .stderr(predicate::str::contains("● main"))
+        .stderr(predicate::str::contains("← here"))
+        .stderr(predicate::str::contains("💡 Use 'grove go <name>'"))
+        .get_output()
+        .stdout
+        .clone();
+
+    assert!(
+        String::from_utf8_lossy(&output).trim().is_empty(),
+        "without --porcelain, list writes nothing to stdout"
+    );
+}

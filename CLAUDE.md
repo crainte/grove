@@ -80,6 +80,20 @@ grove/
 └── Cargo.toml
 ```
 
+### Porcelain Output Invariants
+
+`--porcelain` emits tab-separated records on stdout (see SPEC.md). Two rules
+keep the stream parseable:
+
+1. **Records own stdout.** Human-facing output must use the `note!` macro, never
+   a bare `eprintln!` — `note!` is suppressed in porcelain mode. A bare
+   `println!` in a command path will corrupt the stream.
+2. **Child processes must not inherit stdout.** Hooks run with stdout sent to
+   null in porcelain mode (`config::run_hook_command`). Any new subprocess that
+   could write to stdout needs the same treatment.
+
+Adding a field to a record, or reordering one, is a breaking protocol change.
+
 ### Metadata Storage
 
 `.git/wt/meta.json`:
@@ -152,6 +166,9 @@ Base36 incrementing: `1`, `2`, ... `9`, `a`, `b`, ... `z`, `10`, ...
 | `grove push [paths...]` | Copy ignored files to main |
 | `grove path <name>` | Print path to worktree |
 | `grove init <shell>` | Output shell wrapper (bash/zsh/fish) |
+
+Global flags: `-C <path>` runs as if started elsewhere; `--porcelain` emits
+machine-readable TSV.
 
 ## Configuration
 
