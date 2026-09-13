@@ -78,6 +78,27 @@ g ../other-feature      # go up and create sibling
 
 Context-aware lookup finds children first - `g sub-task` from within `feature/auth` finds the child before any top-level `sub-task`.
 
+### Machine-readable output
+
+The global `--porcelain` flag replaces the decorated rendering with
+tab-separated records on stdout, for scripts and tools:
+
+```bash
+$ grove --porcelain list
+repo	/home/you/project	main
+wt	-	main	/home/you/project	-	pc	0	2	origin/main
+wt	1	feature/auth	/home/you/project/.git/wt/1	-	mu	2	0	main
+```
+
+Each `wt` record is `id`, `branch`, `path`, `parent-id`, `flags`, `ahead`,
+`behind`, and the ref those counts were measured against. Flags are `p` primary,
+`c` current, `m` modified, `u` untracked, `x` missing, `o` orphan; `-` means
+none. Absent optional fields are `-`.
+
+Errors become `error\t<message>` on stderr, leaving stdout clean. Navigation is
+a `cd\t<path>` record rather than the `__grove_cd:` shell prefix. See
+[SPEC.md](SPEC.md#porcelain-output) for the full record list.
+
 ## Configuration
 
 Grove uses TOML config files:

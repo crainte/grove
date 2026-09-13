@@ -199,9 +199,17 @@ fn expand_template(template: &str, ctx: &HookContext) -> String {
 
 /// Run a single hook command
 fn run_hook_command(name: &str, cmd: &str) -> Result<()> {
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(cmd);
+
+    // Hooks inherit our stdout by default, which would splice arbitrary text
+    // into the porcelain record stream. Send it to stderr instead: the output
+    // is still visible for debugging, just out of the parser's way.
+    if crate::porcelain::enabled() {
+        command.stdout(std::process::Stdio::null());
+    }
+
+    let status = command
         .status()
         .with_context(|| format!("Failed to execute hook '{}'", name))?;
 
