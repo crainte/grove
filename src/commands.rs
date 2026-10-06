@@ -34,6 +34,16 @@ pub fn check_orphaned_worktree() -> Result<bool> {
     }
 }
 
+/// Open the metadata database with branch names refreshed from git, so
+/// branches renamed outside grove resolve under their current name.
+fn open_meta(repo_root: &Path) -> Result<Meta> {
+    let meta = Meta::open(repo_root)?;
+    if let Ok(worktrees) = git::worktree_list(repo_root) {
+        meta.refresh_branches(&worktrees)?;
+    }
+    Ok(meta)
+}
+
 /// Go to worktree interactively using fzf
 pub fn go_interactive() -> Result<()> {
     // An interactive picker has no meaning for a machine consumer, and fzf
@@ -44,7 +54,7 @@ pub fn go_interactive() -> Result<()> {
     }
 
     let repo_root = git::find_repo_root()?;
-    let meta = Meta::open(&repo_root)?;
+    let meta = open_meta(&repo_root)?;
 
     // Check if fzf is available
     if !git::has_fzf() {
@@ -91,7 +101,7 @@ pub fn go(name: &str, base: Option<&str>) -> Result<()> {
     use colored::Colorize;
 
     let repo_root = git::find_repo_root()?;
-    let meta = Meta::open(&repo_root)?;
+    let meta = open_meta(&repo_root)?;
 
     // Get current worktree context for child lookup
     let current_id = current_worktree_id(&repo_root)?;
@@ -168,7 +178,7 @@ pub fn go(name: &str, base: Option<&str>) -> Result<()> {
 /// Create worktree without switching
 pub fn add(name: &str, base: Option<&str>) -> Result<()> {
     let repo_root = git::find_repo_root()?;
-    let meta = Meta::open(&repo_root)?;
+    let meta = open_meta(&repo_root)?;
 
     // Check if worktree already exists
     if meta.find_by_branch(name)?.is_some() {
@@ -206,7 +216,7 @@ pub fn add(name: &str, base: Option<&str>) -> Result<()> {
 /// Remove worktree
 pub fn rm(name: &str, force: bool) -> Result<()> {
     let repo_root = git::find_repo_root()?;
-    let meta = Meta::open(&repo_root)?;
+    let meta = open_meta(&repo_root)?;
 
     // If we were inside the removed worktree, cd to main repo
     if remove_worktree(&repo_root, &meta, name, force, None)? {
@@ -398,7 +408,7 @@ pub fn merge(
     use colored::Colorize;
 
     let repo_root = git::find_repo_root()?;
-    let meta = Meta::open(&repo_root)?;
+    let meta = open_meta(&repo_root)?;
     let config = Config::load(&repo_root)?;
     let current_id = current_worktree_id(&repo_root)?;
     let cwd = env::current_dir()?;
@@ -847,7 +857,7 @@ pub fn list() -> Result<()> {
     use colored::Colorize;
 
     let repo_root = git::find_repo_root()?;
-    let meta = Meta::open(&repo_root)?;
+    let meta = open_meta(&repo_root)?;
     let current_id = current_worktree_id(&repo_root)?;
     let default_branch = git::default_branch(&repo_root).unwrap_or_else(|_| "main".to_string());
 
@@ -1049,7 +1059,7 @@ pub fn prune() -> Result<()> {
     use colored::Colorize;
 
     let repo_root = git::find_repo_root()?;
-    let meta = Meta::open(&repo_root)?;
+    let meta = open_meta(&repo_root)?;
     note!("{}", "🧹 Pruning stale worktree references...".yellow());
     git::worktree_prune(&repo_root)?;
 
@@ -1070,6 +1080,7 @@ pub fn sync() -> Result<()> {
     use colored::Colorize;
 
     let repo_root = git::find_repo_root()?;
+    // Not open_meta: sync refreshes branches itself so it can report them
     let meta = Meta::open(&repo_root)?;
     let config = Config::load(&repo_root)?;
 
@@ -1079,13 +1090,14 @@ pub fn sync() -> Result<()> {
     // Sync
     let report = meta.sync(&git_worktrees, &[config.worktree_dir(&repo_root)])?;
 
-    if !report.imported.is_empty() || !report.removed.is_empty() {
+    if !report.imported.is_empty() || !report.removed.is_empty() || !report.renamed.is_empty() {
         note!(
             "{}",
             format!(
-                "✓ Synced: {} imported, {} removed",
+                "✓ Synced: {} imported, {} removed, {} renamed",
                 report.imported.len(),
-                report.removed.len()
+                report.removed.len(),
+                report.renamed.len()
             )
             .green()
         );
@@ -1099,6 +1111,10 @@ pub fn sync() -> Result<()> {
     for (id, branch) in &report.removed {
         porcelain::record(&["removed", id, branch, "stale"]);
     }
+    for (id, old, new) in &report.renamed {
+        note!("  {}", format!("Renamed '{}' -> '{}'", old, new).dimmed());
+        porcelain::record(&["renamed", id, old, new]);
+    }
 
     Ok(())
 }
@@ -1108,7 +1124,7 @@ pub fn clean(target_branch: Option<&str>) -> Result<()> {
     use colored::Colorize;
 
     let repo_root = git::find_repo_root()?;
-    let meta = Meta::open(&repo_root)?;
+    let meta = open_meta(&repo_root)?;
     let main_branch = git::default_branch(&repo_root)?;
     let target = target_branch.unwrap_or(&main_branch);
 
@@ -1121,6 +1137,22 @@ pub fn clean(target_branch: Option<&str>) -> Result<()> {
     let mut skipped = 0;
 
     for (id, info) in meta.all()? {
+        // A missing branch would make the merge check fail; say so rather
+        // than silently treating it as unmerged.
+        if !git::branch_exists(&repo_root, &info.branch).unwrap_or(false) {
+            note!(
+                "{}",
+                format!(
+                    "⚠ Skipping '{}': branch not found (worktree {})",
+                    info.branch, id
+                )
+                .yellow()
+            );
+            porcelain::record(&["skipped", &id, &info.branch, "missing-branch"]);
+            skipped += 1;
+            continue;
+        }
+
         // Determine target: use branch's upstream if available, otherwise fall back to target
         let check_against =
             git::upstream_branch(&repo_root, &info.branch).unwrap_or_else(|| target.to_string());
@@ -1242,7 +1274,7 @@ pub fn pull(paths: &[String]) -> Result<()> {
     let current_id =
         current_id.ok_or_else(|| anyhow::anyhow!("Cannot pull: already in primary worktree"))?;
 
-    let meta = Meta::open(&repo_root)?;
+    let meta = open_meta(&repo_root)?;
     let current_wt = meta.worktree_path(&current_id);
 
     // Source is repo root (main worktree)
@@ -1280,7 +1312,7 @@ pub fn push(paths: &[String]) -> Result<()> {
     let current_id =
         current_id.ok_or_else(|| anyhow::anyhow!("Cannot push: already in primary worktree"))?;
 
-    let meta = Meta::open(&repo_root)?;
+    let meta = open_meta(&repo_root)?;
     let current_wt = meta.worktree_path(&current_id);
 
     // Source is current worktree, dest is repo root
@@ -1310,7 +1342,7 @@ pub fn push(paths: &[String]) -> Result<()> {
 /// Print path to worktree
 pub fn path(name: &str) -> Result<()> {
     let repo_root = git::find_repo_root()?;
-    let meta = Meta::open(&repo_root)?;
+    let meta = open_meta(&repo_root)?;
 
     let id = meta
         .find_by_branch(name)?

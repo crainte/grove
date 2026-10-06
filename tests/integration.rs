@@ -3139,3 +3139,69 @@ fn test_porcelain_merge_emits_merged() {
     assert_eq!(merged[2], "feat");
     assert_eq!(merged[3], "main");
 }
+
+// =============================================================================
+// RENAMED BRANCHES: branches renamed with `git branch -m` after `grove add`
+// =============================================================================
+
+#[test]
+fn test_clean_handles_renamed_branch() {
+    let dir = setup_git_repo();
+    let wt = add_with_commit(&dir, "feature", None);
+    git(&wt, &["branch", "-m", "feature", "team/feature"]);
+    git(dir.path(), &["merge", "team/feature"]);
+
+    grove()
+        .args(["clean"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Removing 'team/feature'"));
+
+    assert!(!wt.exists());
+    let branches = git(dir.path(), &["branch", "--list", "team/feature"]);
+    assert!(branches.is_empty(), "branch not deleted: {}", branches);
+}
+
+#[test]
+fn test_sync_updates_renamed_branch() {
+    let dir = setup_git_repo();
+    let wt = add_with_commit(&dir, "feature", None);
+    git(&wt, &["branch", "-m", "feature", "team/feature"]);
+
+    grove()
+        .args(["--porcelain", "sync"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "renamed\t1\tfeature\tteam/feature",
+        ));
+
+    grove()
+        .args(["list"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("team/feature"));
+}
+
+#[test]
+fn test_clean_warns_on_missing_branch() {
+    let dir = setup_git_repo();
+    let wt = add_with_commit(&dir, "feature", None);
+    // Detach so the branch can be deleted out from under grove
+    git(&wt, &["checkout", "--detach"]);
+    git(dir.path(), &["branch", "-D", "feature"]);
+
+    grove()
+        .args(["--porcelain", "clean"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "skipped\t1\tfeature\tmissing-branch",
+        ));
+
+    assert!(wt.exists());
+}
