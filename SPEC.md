@@ -155,8 +155,9 @@ created   <id>  <branch>  <abspath>
 removed   <id>  <branch>  <reason>          # explicit | merged:<ref> | stale
 merged    <id>  <branch>  <target>          # id is - if source is not a grove worktree
 orphaned  <id>  <branch>
-skipped   <id>  <branch>  <reason>          # dirty
+skipped   <id>  <branch>  <reason>          # dirty | missing-branch
 imported  <id>  <branch>
+renamed   <id>  <old-branch>  <new-branch>
 pruned
 fetched
 pulled
@@ -198,7 +199,7 @@ default branch. Bare counts are ambiguous without it.
 | `done` | `fetched`, `pulled`, then `clean` records, `cd` |
 | `prune` | `removed`* (reason `stale`), `pruned` |
 | `merge` | `merged`; with `--rm` also `removed`, `orphaned`*, `cd` if the cwd was inside the source |
-| `sync` | `imported`*, `removed`* |
+| `sync` | `imported`*, `removed`*, `renamed`* |
 | `pull` / `push` | `copied`, `copyfail`* |
 | `path` | `path` |
 | `init`, `complete` | Flag ignored; already machine output |

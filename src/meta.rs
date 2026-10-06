@@ -16,6 +16,9 @@ pub struct SyncReport {
     /// (id, branch) pairs dropped from the database because git no longer
     /// knows about them and the directory is gone.
     pub removed: Vec<(String, String)>,
+    /// (id, old, new) branch names updated because the branch was renamed
+    /// outside grove.
+    pub renamed: Vec<(String, String, String)>,
 }
 
 /// Metadata database for worktrees in a repository
@@ -406,6 +409,7 @@ impl Meta {
     ) -> Result<SyncReport> {
         let legacy_dir = self.repo_root.join(".git/wt");
         let mut imported = Vec::new();
+        let renamed = self.refresh_branches(git_worktrees)?;
 
         // Import worktrees that exist in git but not in our database
         for wt in git_worktrees {
@@ -462,7 +466,45 @@ impl Meta {
         }
 
         let removed = self.remove_stale(git_worktrees)?;
-        Ok(SyncReport { imported, removed })
+        Ok(SyncReport {
+            imported,
+            removed,
+            renamed,
+        })
+    }
+
+    /// Update stored branch names to what git has checked out in each
+    /// worktree. Branches renamed with `git branch -m` otherwise leave stale
+    /// names behind, which every git call made with them then fails on.
+    /// Returns the (id, old, new) triples updated.
+    pub fn refresh_branches(
+        &self,
+        git_worktrees: &[crate::git::GitWorktree],
+    ) -> Result<Vec<(String, String, String)>> {
+        let mut renamed = Vec::new();
+        for (id, info) in self.all()? {
+            let path = self.worktree_path(&id);
+            let Some(live) = git_worktrees
+                .iter()
+                .find(|wt| wt.path == path)
+                .and_then(|wt| wt.branch.as_ref())
+            else {
+                continue;
+            };
+            if *live == info.branch {
+                continue;
+            }
+            // OR IGNORE: another row may still hold the name (e.g. two
+            // branches swapped); it is corrected on the next refresh.
+            let changed = self.conn.execute(
+                "UPDATE OR IGNORE worktrees SET branch = ?1 WHERE id = ?2",
+                params![live, id],
+            )?;
+            if changed > 0 {
+                renamed.push((id, info.branch, live.clone()));
+            }
+        }
+        Ok(renamed)
     }
 
     /// Drop rows whose directory is gone and which git no longer lists as a
@@ -691,5 +733,37 @@ mod tests {
         // Without context, we still find it
         let found = meta.find_by_branch_with_context("child", None).unwrap();
         assert_eq!(found, Some(child_id));
+    }
+
+    #[test]
+    fn test_refresh_branches_follows_renames() {
+        let (_dir, meta) = setup();
+        let renamed = meta.add_worktree("old", None, None, None).unwrap();
+        let same = meta.add_worktree("same", None, None, None).unwrap();
+        let gone = meta.add_worktree("gone", None, None, None).unwrap();
+        let worktrees = vec![
+            crate::git::GitWorktree {
+                path: meta.worktree_path(&renamed),
+                branch: Some("prefix/old".into()),
+            },
+            crate::git::GitWorktree {
+                path: meta.worktree_path(&same),
+                branch: Some("same".into()),
+            },
+        ];
+
+        let changes = meta.refresh_branches(&worktrees).unwrap();
+
+        assert_eq!(
+            changes,
+            vec![(renamed.clone(), "old".to_string(), "prefix/old".to_string())]
+        );
+        assert_eq!(
+            meta.get_worktree(&renamed).unwrap().unwrap().branch,
+            "prefix/old"
+        );
+        assert_eq!(meta.get_worktree(&same).unwrap().unwrap().branch, "same");
+        // Not listed by git: left for remove_stale to decide
+        assert_eq!(meta.get_worktree(&gone).unwrap().unwrap().branch, "gone");
     }
 }
