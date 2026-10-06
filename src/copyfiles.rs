@@ -30,9 +30,13 @@ pub fn list_ignored_files(worktree: &Path) -> Result<Vec<String>> {
         anyhow::bail!("git ls-files failed");
     }
 
+    // git reports an ignored nested repository or worktree (such as a sibling
+    // under `.wt/`) as a single `dir/` entry. Copying it would duplicate a
+    // whole checkout, so skip anything that is its own git working tree.
     let files: Vec<String> = String::from_utf8(output.stdout)?
         .lines()
         .filter(|s| !s.is_empty())
+        .filter(|s| !(s.ends_with('/') && worktree.join(s).join(".git").exists()))
         .map(String::from)
         .collect();
 

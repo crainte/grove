@@ -55,16 +55,19 @@ fn detect_orphaned_worktree() -> Option<PathBuf> {
         std::env::var("PWD").ok()?
     };
 
-    // Check if path contains /.git/wt/
-    if let Some(idx) = cwd_str.find("/.git/wt/") {
-        let main_repo = PathBuf::from(&cwd_str[..idx]);
-        // Verify the main repo still exists
-        if main_repo.is_dir() && main_repo.join(".git").exists() {
-            return Some(main_repo);
-        }
-    }
+    repo_root_above(Path::new(&cwd_str))
+}
 
-    None
+/// Walk up from `path` to the nearest directory holding a grove database.
+///
+/// `path` itself may no longer exist. Worktrees can live anywhere under the
+/// repo (`.wt/<id>`, legacy `.git/wt/<id>`, a configured dir), so the database
+/// is the one marker that identifies the repo regardless of layout.
+fn repo_root_above(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .skip(1)
+        .find(|dir| dir.join(".git/wt/grove.db").is_file())
+        .map(Path::to_path_buf)
 }
 
 /// Get the default branch name (main or master)
@@ -381,9 +384,127 @@ pub fn ahead_behind_against(
     }
 }
 
-/// Get the wt directory for storing worktrees
-pub fn wt_dir(repo_root: &Path) -> PathBuf {
-    repo_root.join(".git/wt")
+/// Append `pattern` to `.git/info/exclude` unless it is already there.
+/// Returns true if the file was changed.
+pub fn ensure_excluded(repo_root: &Path, pattern: &str) -> Result<bool> {
+    let path = repo_root.join(".git/info/exclude");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == pattern) {
+        return Ok(false);
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut content = existing;
+    if !content.is_empty() && !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(pattern);
+    content.push('\n');
+    std::fs::write(&path, content)
+        .with_context(|| format!("Failed to update {}", path.display()))?;
+    Ok(true)
+}
+
+/// Whether `rev` names a commit (local branch, remote-tracking ref, sha...)
+pub fn rev_exists(repo_root: &Path, rev: &str) -> bool {
+    Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{}^{{commit}}", rev),
+        ])
+        .current_dir(repo_root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Whether `ancestor` is reachable from `descendant`
+pub fn is_ancestor(repo_root: &Path, ancestor: &str, descendant: &str) -> bool {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(repo_root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// The branch `branch` was created from, per its reflog (`branch: Created
+/// from X`). Reflogs are local and expire, so this is a best-effort fallback
+/// for worktrees created before grove recorded their base.
+pub fn reflog_created_from(repo_root: &Path, branch: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args([
+            "reflog",
+            "show",
+            "--format=%gs",
+            &format!("refs/heads/{}", branch),
+        ])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let from = text
+        .lines()
+        .last()?
+        .strip_prefix("branch: Created from ")?
+        .trim()
+        .to_string();
+    // `git worktree add -b x` with no start point records "HEAD"
+    (from != "HEAD").then_some(from)
+}
+
+/// The branch checked out in `dir`, or None when detached
+pub fn current_branch(dir: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Whether a merge is in progress in the worktree at `dir`
+pub fn merge_in_progress(dir: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        .current_dir(dir)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Run `git merge --no-ff -m <message> <source>` in `dir`.
+///
+/// git's own output is shown on stderr (null in porcelain mode): stdout is
+/// reserved for records and for the `__grove_cd:` line the shell wrapper
+/// looks for.
+pub fn merge_no_ff(dir: &Path, source: &str, message: &str) -> Result<bool> {
+    use std::os::fd::AsFd;
+    use std::process::Stdio;
+
+    let stdout = if crate::porcelain::enabled() {
+        Stdio::null()
+    } else {
+        Stdio::from(std::io::stderr().as_fd().try_clone_to_owned()?)
+    };
+
+    let status = Command::new("git")
+        .args(["merge", "--no-ff", "-m", message, source])
+        .current_dir(dir)
+        .stdout(stdout)
+        .status()
+        .context("Failed to execute git merge")?;
+    Ok(status.success())
 }
 
 /// Ensure worktrees can find hooks from the main repo.
@@ -558,9 +679,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_wt_dir() {
-        let root = PathBuf::from("/repo");
-        assert_eq!(wt_dir(&root), PathBuf::from("/repo/.git/wt"));
+    fn test_repo_root_above_finds_grove_repo_for_any_layout() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git/wt")).unwrap();
+        std::fs::write(root.join(".git/wt/grove.db"), "").unwrap();
+
+        // Neither directory exists: the shell is stuck in a deleted worktree
+        assert_eq!(
+            repo_root_above(&root.join(".wt/3/src")),
+            Some(root.to_path_buf())
+        );
+        assert_eq!(
+            repo_root_above(&root.join(".git/wt/3")),
+            Some(root.to_path_buf())
+        );
+        assert_eq!(repo_root_above(Path::new("/nonexistent/x/y")), None);
+    }
+
+    #[test]
+    fn test_ensure_excluded_is_idempotent() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        assert!(ensure_excluded(dir.path(), "/.wt/").unwrap());
+        assert!(!ensure_excluded(dir.path(), "/.wt/").unwrap());
+        let content = std::fs::read_to_string(dir.path().join(".git/info/exclude")).unwrap();
+        assert_eq!(content.lines().filter(|l| *l == "/.wt/").count(), 1);
+        assert!(content.ends_with('\n'));
     }
 
     #[test]

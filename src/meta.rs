@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 
 /// Information about a single worktree
@@ -59,10 +59,49 @@ impl Meta {
             INSERT OR IGNORE INTO meta (key, value) VALUES ('next_id', 1);",
         )?;
 
+        Self::migrate(&conn)?;
+
         Ok(Self {
             conn,
             repo_root: repo_root.to_path_buf(),
         })
+    }
+
+    /// Bring an older database up to the current schema.
+    ///
+    /// Versions are tracked with `PRAGMA user_version`. The check and the
+    /// `ALTER`s share one immediate transaction so two grove processes opening
+    /// a v0 database at once cannot both try to add the same column.
+    fn migrate(conn: &Connection) -> Result<()> {
+        const CURRENT: i64 = 1;
+
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version >= CURRENT {
+            return Ok(());
+        }
+
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| -> Result<()> {
+            let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            if version < 1 {
+                // NULL path means the legacy location, `.git/wt/<id>`.
+                conn.execute_batch(
+                    "ALTER TABLE worktrees ADD COLUMN path TEXT;
+                     ALTER TABLE worktrees ADD COLUMN base TEXT;",
+                )?;
+            }
+            conn.pragma_update(None, "user_version", CURRENT)?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => conn.execute_batch("COMMIT")?,
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
+            }
+        }
+        Ok(())
     }
 
     /// Get the path to the database file
@@ -80,15 +119,27 @@ impl Meta {
         Ok(base36_encode(id))
     }
 
-    /// Add a new worktree atomically, returns the assigned ID
-    pub fn add_worktree(&self, branch: &str, parent: Option<&str>) -> Result<String> {
+    /// Add a new worktree atomically, returns the assigned ID.
+    ///
+    /// `base` is the branch the worktree was created from. `dir` is the
+    /// directory that holds worktrees; the worktree lives at `dir/<id>`.
+    /// `None` stores no path, which means the legacy `.git/wt/<id>`.
+    pub fn add_worktree(
+        &self,
+        branch: &str,
+        parent: Option<&str>,
+        base: Option<&str>,
+        dir: Option<&Path>,
+    ) -> Result<String> {
         let id = self.next_id()?;
         let created = Utc::now().to_rfc3339();
+        let path = dir.map(|d| d.join(&id).to_string_lossy().to_string());
 
         self.conn
             .execute(
-                "INSERT INTO worktrees (id, branch, parent, created) VALUES (?1, ?2, ?3, ?4)",
-                params![id, branch, parent, created],
+                "INSERT INTO worktrees (id, branch, parent, created, path, base)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, branch, parent, created, path, base],
             )
             .with_context(|| format!("Failed to add worktree '{}'", branch))?;
 
@@ -182,9 +233,55 @@ impl Meta {
         self.find_by_branch(branch)
     }
 
-    /// Get worktree path
+    /// Get worktree path: the stored path, or `.git/wt/<id>` for rows created
+    /// before paths were recorded (and for ids not in the database).
     pub fn worktree_path(&self, id: &str) -> PathBuf {
+        let stored: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT path FROM worktrees WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        match stored {
+            Some(p) => PathBuf::from(p),
+            None => self.legacy_path(id),
+        }
+    }
+
+    fn legacy_path(&self, id: &str) -> PathBuf {
         self.repo_root.join(".git/wt").join(id)
+    }
+
+    /// The branch a worktree was created from, if it was recorded.
+    pub fn base_of(&self, id: &str) -> Result<Option<String>> {
+        let base = self
+            .conn
+            .query_row(
+                "SELECT base FROM worktrees WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(base.flatten())
+    }
+
+    /// Find the worktree containing `path`. The deepest match wins, so a
+    /// worktree stored inside another directory is never mistaken for it.
+    pub fn find_by_path(&self, path: &Path) -> Result<Option<String>> {
+        let mut best: Option<(String, usize)> = None;
+        for (id, _) in self.all()? {
+            let wt = self.worktree_path(&id);
+            if path.starts_with(&wt) {
+                let depth = wt.components().count();
+                if best.as_ref().is_none_or(|(_, d)| depth > *d) {
+                    best = Some((id, depth));
+                }
+            }
+        }
+        Ok(best.map(|(id, _)| id))
     }
 
     /// Get children of a worktree, sorted by branch name
@@ -298,17 +395,24 @@ impl Meta {
 
     /// Sync database with git worktrees.
     ///
+    /// `dirs` are the directories grove stores worktrees in; git worktrees
+    /// directly inside one of them (or the legacy `.git/wt`) are imported.
     /// Returns the worktrees that were imported and the ids that were dropped,
     /// rather than bare counts, so callers can report specifics.
-    pub fn sync(&self, git_worktrees: &[crate::git::GitWorktree]) -> Result<SyncReport> {
-        let wt_dir = self.repo_root.join(".git/wt");
+    pub fn sync(
+        &self,
+        git_worktrees: &[crate::git::GitWorktree],
+        dirs: &[PathBuf],
+    ) -> Result<SyncReport> {
+        let legacy_dir = self.repo_root.join(".git/wt");
         let mut imported = Vec::new();
-        let mut removed = Vec::new();
 
         // Import worktrees that exist in git but not in our database
         for wt in git_worktrees {
-            // Skip if not under our .git/wt/ directory
-            if !wt.path.starts_with(&wt_dir) {
+            let Some(parent) = wt.path.parent() else {
+                continue;
+            };
+            if parent != legacy_dir && !dirs.iter().any(|d| d == parent) {
                 continue;
             }
 
@@ -330,11 +434,15 @@ impl Meta {
             };
             let branch_for_record = branch.clone();
 
+            // Legacy rows keep a NULL path so they resolve as before
+            let path = (parent != legacy_dir).then(|| wt.path.to_string_lossy().to_string());
+
             // Import it
             let created = chrono::Utc::now().to_rfc3339();
             self.conn.execute(
-                "INSERT OR IGNORE INTO worktrees (id, branch, parent, created) VALUES (?1, ?2, NULL, ?3)",
-                rusqlite::params![id, branch, created],
+                "INSERT OR IGNORE INTO worktrees (id, branch, parent, created, path)
+                 VALUES (?1, ?2, NULL, ?3, ?4)",
+                rusqlite::params![id, branch, created, path],
             )?;
 
             // Update next_id if needed
@@ -353,26 +461,28 @@ impl Meta {
             ));
         }
 
-        // Remove entries that no longer exist in git
-        let our_worktrees: Vec<String> = {
-            let mut stmt = self.conn.prepare("SELECT id FROM worktrees")?;
-            let rows = stmt.query_map([], |row| row.get(0))?;
-            rows.filter_map(|r| r.ok()).collect()
-        };
+        let removed = self.remove_stale(git_worktrees)?;
+        Ok(SyncReport { imported, removed })
+    }
 
-        for id in our_worktrees {
-            let our_path = wt_dir.join(&id);
+    /// Drop rows whose directory is gone and which git no longer lists as a
+    /// worktree. Returns the (id, branch) pairs removed.
+    pub fn remove_stale(
+        &self,
+        git_worktrees: &[crate::git::GitWorktree],
+    ) -> Result<Vec<(String, String)>> {
+        let mut removed = Vec::new();
+        for (id, info) in self.all()? {
+            let our_path = self.worktree_path(&id);
             let exists_in_git = git_worktrees.iter().any(|wt| wt.path == our_path);
 
             if !exists_in_git && !our_path.exists() {
-                let info = self.get_worktree(&id)?;
                 self.conn
-                    .execute("DELETE FROM worktrees WHERE id = ?1", rusqlite::params![id])?;
-                removed.push((id, info.map(|i| i.branch).unwrap_or_default()));
+                    .execute("DELETE FROM worktrees WHERE id = ?1", params![id])?;
+                removed.push((id, info.branch));
             }
         }
-
-        Ok(SyncReport { imported, removed })
+        Ok(removed)
     }
 }
 
@@ -414,7 +524,7 @@ mod tests {
     #[test]
     fn test_add_worktree() {
         let (_dir, meta) = setup();
-        let id = meta.add_worktree("feature/test", None).unwrap();
+        let id = meta.add_worktree("feature/test", None, None, None).unwrap();
         assert_eq!(id, "1");
 
         let info = meta.get_worktree("1").unwrap().unwrap();
@@ -424,8 +534,10 @@ mod tests {
     #[test]
     fn test_add_worktree_with_parent() {
         let (_dir, meta) = setup();
-        let parent_id = meta.add_worktree("parent", None).unwrap();
-        let child_id = meta.add_worktree("child", Some(&parent_id)).unwrap();
+        let parent_id = meta.add_worktree("parent", None, None, None).unwrap();
+        let child_id = meta
+            .add_worktree("child", Some(&parent_id), None, None)
+            .unwrap();
 
         // Verify parent-child relationship via children()
         let children = meta.children(&parent_id).unwrap();
@@ -437,7 +549,7 @@ mod tests {
     #[test]
     fn test_find_by_branch() {
         let (_dir, meta) = setup();
-        meta.add_worktree("feature/test", None).unwrap();
+        meta.add_worktree("feature/test", None, None, None).unwrap();
 
         assert_eq!(
             meta.find_by_branch("feature/test").unwrap(),
@@ -449,7 +561,7 @@ mod tests {
     #[test]
     fn test_remove_worktree() {
         let (_dir, meta) = setup();
-        meta.add_worktree("test", None).unwrap();
+        meta.add_worktree("test", None, None, None).unwrap();
 
         let removed = meta.remove_worktree("1").unwrap();
         assert!(removed.is_some());
@@ -461,8 +573,8 @@ mod tests {
     #[test]
     fn test_top_level() {
         let (_dir, meta) = setup();
-        meta.add_worktree("beta", None).unwrap();
-        meta.add_worktree("alpha", None).unwrap();
+        meta.add_worktree("beta", None, None, None).unwrap();
+        meta.add_worktree("alpha", None, None, None).unwrap();
 
         let top = meta.top_level().unwrap();
         assert_eq!(top.len(), 2);
@@ -473,14 +585,83 @@ mod tests {
     #[test]
     fn test_children() {
         let (_dir, meta) = setup();
-        let parent = meta.add_worktree("parent", None).unwrap();
-        meta.add_worktree("child-b", Some(&parent)).unwrap();
-        meta.add_worktree("child-a", Some(&parent)).unwrap();
+        let parent = meta.add_worktree("parent", None, None, None).unwrap();
+        meta.add_worktree("child-b", Some(&parent), None, None)
+            .unwrap();
+        meta.add_worktree("child-a", Some(&parent), None, None)
+            .unwrap();
 
         let children = meta.children(&parent).unwrap();
         assert_eq!(children.len(), 2);
         assert_eq!(children[0].1.branch, "child-a"); // sorted
         assert_eq!(children[1].1.branch, "child-b");
+    }
+
+    #[test]
+    fn test_new_row_uses_stored_path_and_base() {
+        let (dir, meta) = setup();
+        let wt_dir = dir.path().join(".wt");
+        let id = meta
+            .add_worktree("feat", None, Some("develop"), Some(&wt_dir))
+            .unwrap();
+        assert_eq!(meta.worktree_path(&id), wt_dir.join(&id));
+        assert_eq!(meta.base_of(&id).unwrap(), Some("develop".to_string()));
+    }
+
+    #[test]
+    fn test_legacy_row_falls_back_to_git_wt() {
+        let (dir, meta) = setup();
+        let id = meta.add_worktree("feat", None, None, None).unwrap();
+        assert_eq!(
+            meta.worktree_path(&id),
+            dir.path().join(".git/wt").join(&id)
+        );
+        assert_eq!(meta.base_of(&id).unwrap(), None);
+    }
+
+    #[test]
+    fn test_migrates_v0_schema_idempotently() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git/wt")).unwrap();
+        {
+            let conn = Connection::open(dir.path().join(".git/wt/grove.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE worktrees (id TEXT PRIMARY KEY, branch TEXT NOT NULL UNIQUE,
+                     parent TEXT, created TEXT NOT NULL);
+                 CREATE TABLE meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+                 INSERT INTO meta VALUES ('next_id', 2);
+                 INSERT INTO worktrees VALUES ('1', 'old', NULL, 'now');",
+            )
+            .unwrap();
+        }
+        drop(Meta::open(dir.path()).unwrap());
+        let meta = Meta::open(dir.path()).unwrap();
+        assert_eq!(meta.worktree_path("1"), dir.path().join(".git/wt/1"));
+        assert_eq!(meta.base_of("1").unwrap(), None);
+        let id = meta
+            .add_worktree("new", None, Some("main"), Some(&dir.path().join(".wt")))
+            .unwrap();
+        assert_eq!(id, "2");
+        assert_eq!(meta.worktree_path(&id), dir.path().join(".wt/2"));
+    }
+
+    #[test]
+    fn test_find_by_path_prefers_longest_match() {
+        let (dir, meta) = setup();
+        let wt_dir = dir.path().join(".wt");
+        let a = meta.add_worktree("a", None, None, Some(&wt_dir)).unwrap();
+        let legacy = meta.add_worktree("b", None, None, None).unwrap();
+        assert_eq!(
+            meta.find_by_path(&wt_dir.join(&a).join("src/deep"))
+                .unwrap(),
+            Some(a)
+        );
+        assert_eq!(
+            meta.find_by_path(&dir.path().join(".git/wt").join(&legacy))
+                .unwrap(),
+            Some(legacy)
+        );
+        assert_eq!(meta.find_by_path(dir.path()).unwrap(), None);
     }
 
     #[test]
@@ -496,8 +677,10 @@ mod tests {
     #[test]
     fn test_find_by_branch_with_context() {
         let (_dir, meta) = setup();
-        let parent = meta.add_worktree("parent", None).unwrap();
-        let child_id = meta.add_worktree("child", Some(&parent)).unwrap();
+        let parent = meta.add_worktree("parent", None, None, None).unwrap();
+        let child_id = meta
+            .add_worktree("child", Some(&parent), None, None)
+            .unwrap();
 
         // When we have context (parent), we should find the child
         let found = meta

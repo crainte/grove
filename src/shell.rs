@@ -36,10 +36,10 @@ _g_complete() {{
     local cur="${{COMP_WORDS[COMP_CWORD]}}"
     local prev="${{COMP_WORDS[COMP_CWORD-1]}}"
     
-    local commands="go add rm list ls prune clean done pull push path init sync help config"
+    local commands="go add rm merge list ls prune clean done pull push path init sync help config"
     
     case "${{prev}}" in
-        go|path)
+        go|path|merge|--into)
             # Complete with all worktree names (including main)
             COMPREPLY=( $(compgen -W "$(__grove_worktrees go)" -- "$cur") )
             ;;
@@ -104,10 +104,10 @@ __grove_worktrees() {{
 
 # Zsh completion for g
 _g_complete() {{
-    local commands="go add rm list ls prune clean done pull push path init sync help config"
+    local commands="go add rm merge list ls prune clean done pull push path init sync help config"
     
     case "${{words[2]}}" in
-        go|path)
+        go|path|merge)
             # All worktrees including main
             local worktree_names=(${{(f)"$(__grove_worktrees go)"}})
             compadd -a worktree_names
@@ -167,14 +167,18 @@ function __grove_worktrees
 end
 
 # Completions for g and grove
-complete -c g -f -n '__fish_use_subcommand' -a 'go add rm list ls prune clean done pull push path init sync help config'
+complete -c g -f -n '__fish_use_subcommand' -a 'go add rm merge list ls prune clean done pull push path init sync help config'
 complete -c g -f -n '__fish_use_subcommand' -a '(__grove_worktrees go)'
-complete -c g -f -n '__fish_seen_subcommand_from go path' -a '(__grove_worktrees go)'
+complete -c g -f -n '__fish_seen_subcommand_from go path merge' -a '(__grove_worktrees go)'
+complete -c g -f -n '__fish_seen_subcommand_from merge' -l into -xa '(__grove_worktrees go)'
+complete -c g -f -n '__fish_seen_subcommand_from merge' -l rm -d 'Remove source after merging'
 complete -c g -f -n '__fish_seen_subcommand_from rm' -a '(__grove_worktrees rm)'
 complete -c g -f -n '__fish_seen_subcommand_from add' -a '(git branch --format="%(refname:short)" 2>/dev/null)'
-complete -c grove -f -n '__fish_use_subcommand' -a 'go add rm list ls prune clean done pull push path init sync help config'
+complete -c grove -f -n '__fish_use_subcommand' -a 'go add rm merge list ls prune clean done pull push path init sync help config'
 complete -c grove -f -n '__fish_use_subcommand' -a '(__grove_worktrees go)'
-complete -c grove -f -n '__fish_seen_subcommand_from go path' -a '(__grove_worktrees go)'
+complete -c grove -f -n '__fish_seen_subcommand_from go path merge' -a '(__grove_worktrees go)'
+complete -c grove -f -n '__fish_seen_subcommand_from merge' -l into -xa '(__grove_worktrees go)'
+complete -c grove -f -n '__fish_seen_subcommand_from merge' -l rm -d 'Remove source after merging'
 complete -c grove -f -n '__fish_seen_subcommand_from rm' -a '(__grove_worktrees rm)'
 complete -c grove -f -n '__fish_seen_subcommand_from add' -a '(git branch --format="%(refname:short)" 2>/dev/null)'
 "#

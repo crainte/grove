@@ -29,7 +29,9 @@ This applies to:
 
 **Original problem**: Worktrees stored in `~/.worktrees/{repo}/{name}` couldn't inherit `.mise.toml` from the repo root.
 
-**Solution**: Store worktrees in `{repo}/.git/wt/{id}/`. Since they're inside the repo directory tree, config files are inherited naturally.
+**Solution**: Store worktrees in `{repo}/.wt/{id}/` (configurable via `dir`). Since they're inside the repo directory tree, config files are inherited naturally. `/.wt/` is added to `.git/info/exclude` so it is never committed.
+
+**History**: worktrees originally lived in `{repo}/.git/wt/{id}/`. That broke tools which skip any path containing `.git` (Vite/Vitest block it by default; watchers and linters too). Rows created then have a NULL `path` in the DB and still resolve to `.git/wt/{id}`. The database itself stays at `.git/wt/grove.db`.
 
 ### 2. Nested Worktrees Without Visible Folders
 
@@ -38,7 +40,7 @@ This applies to:
 **Solution (bash attempt)**: Use `--` delimiter for flat storage: `.git/wt/test--sub/`. But this polluted branch names.
 
 **Solution (grove)**: Decouple storage from naming entirely:
-- Storage uses short IDs: `.git/wt/a1/`, `.git/wt/b2/`
+- Storage uses short IDs: `.wt/1/`, `.wt/2/`
 - Metadata file tracks: branch name, parent relationship, timestamps
 - Any branch name works, no encoding needed
 
@@ -96,7 +98,13 @@ Adding a field to a record, or reordering one, is a breaking protocol change.
 
 ### Metadata Storage
 
-`.git/wt/meta.json`:
+`.git/wt/grove.db` (SQLite). Table `worktrees(id, branch, parent, created, path, base)`;
+schema version tracked with `PRAGMA user_version` and migrated in `Meta::open`.
+`path` NULL = legacy `.git/wt/<id>`; `base` = branch the worktree was created
+from. Always resolve paths through `Meta::worktree_path` / `Meta::find_by_path`,
+never by assuming a directory layout.
+
+The original JSON format, kept for reference:
 ```json
 {
   "version": 1,
@@ -134,13 +142,14 @@ Base36 incrementing: `1`, `2`, ... `9`, `a`, `b`, ... `z`, `10`, ...
 - `commands.rs` — All commands implemented:
   - `go` — Navigate/create worktrees with fzf support, context-aware child lookup
   - `add` — Create worktree without switching
-  - `rm` — Remove worktree and branch (with `--force` for dirty trees)
+  - `rm` — Remove worktree and branch. Refuses *before touching anything* unless the branch is reachable from HEAD/upstream/base or its content is on the base; `--force` overrides
+  - `merge` — git-style `--no-ff` merge: positional = source, `--into` = target, nothing implied; `--rm` removes source after
   - `list/ls` — Tree rendering with orphan detection and dimmed styling
   - `clean` — Remove merged worktrees (uses `git cherry` for squash-merge detection)
   - `done` — cd to main, pull latest, clean merged worktrees
   - `pull/push` — Copy gitignored files between main and current worktree
   - `path` — Print path to named worktree
-  - `prune` — Delegate to `git worktree prune`
+  - `prune` — `git worktree prune`, then drop DB rows whose dir and git worktree are gone
   - `sync` — Import existing git worktrees into grove metadata
   - `init` — Output shell integration script
   - `complete` — Shell completion with context-aware worktree names
@@ -157,8 +166,9 @@ Base36 incrementing: `1`, `2`, ... `9`, `a`, `b`, ... `z`, `10`, ...
 | `grove go [name] [base]` | Explicit go (same behavior) |
 | `grove add <name> [base]` | Create without switching |
 | `grove rm <name> [--force]` | Remove worktree and branch |
+| `grove merge [src] [--into tgt] [-m msg] [--rm]` | Merge src into tgt (`--no-ff`) |
 | `grove list` / `grove ls` | Show worktree tree |
-| `grove prune` | Clean stale git worktree references |
+| `grove prune` | Clean stale git worktree references and DB entries |
 | `grove sync` | Import existing git worktrees into grove metadata |
 | `grove clean [branch]` | Remove worktrees merged into branch (default: main) |
 | `grove done` | cd to main, pull, clean |
@@ -188,6 +198,13 @@ Local config takes precedence over global.
 
 # Copy these patterns when creating worktrees (from gitignored files)
 copy = [".env*", ".terraform/", ".mise.local.toml"]
+
+# Worktree directory (default ".wt")
+dir = ".wt"
+
+# grove merge commit message
+[merge]
+message = "chore: merge {{branch}} into {{target}}"
 
 # Hooks: blocks run sequentially, tasks within a block run in parallel
 [[hooks.post-create]]
@@ -244,6 +261,10 @@ Never implement features before writing tests.
 | Decision | Rationale |
 |----------|-----------|
 | Store in `.git/wt/` | Inherit repo config files (mise.toml) |
+| Move default to `.wt/` + `info/exclude` | Tools skip `.git` paths; still inherits config; exclude is local so no tracked diff |
+| Record `base` per worktree | Merge hints and rm's merged check need it; git only keeps it in an expiring reflog |
+| `grove merge` positional = source | Matches `git merge`; target never implied since it may be another worktree |
+| rm checks merged before removing | Previously the worktree was deleted, then branch delete failed, leaving a stale ✗ row |
 | Metadata in JSON | Proper escaping, extensible, readable |
 | Short base36 IDs | Compact paths, avoid encoding issues |
 | `__grove_cd:` prefix | Shell-agnostic navigation protocol |
