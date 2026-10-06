@@ -146,7 +146,7 @@ fn test_list_shows_path_below_worktree() {
         .assert()
         .success()
         .stderr(predicate::str::contains("feature-test"))
-        .stderr(predicate::str::contains(".git/wt/"));
+        .stderr(predicate::str::contains(".wt/"));
 }
 
 #[test]
@@ -482,7 +482,7 @@ fn test_go_existing_outputs_cd() {
         .assert()
         .success()
         .stdout(predicate::str::contains("__grove_cd:"))
-        .stdout(predicate::str::contains(".git/wt/"));
+        .stdout(predicate::str::contains(".wt/"));
 }
 
 #[test]
@@ -511,7 +511,7 @@ fn test_go_missing_directory_falls_back_to_default_branch() {
         .success();
 
     // Manually delete the worktree directory (simulating external removal)
-    let wt_path = repo.path().join(".git/wt/1");
+    let wt_path = repo.path().join(".wt/1");
     std::fs::remove_dir_all(&wt_path).unwrap();
 
     // Try to go to it — should fallback to default branch with warning
@@ -610,7 +610,7 @@ fn test_rm_current_worktree_outputs_cd_to_main() {
         .assert()
         .success();
 
-    let wt_path = repo.path().join(".git/wt/1");
+    let wt_path = repo.path().join(".wt/1");
 
     // Remove while "inside" that worktree - should output __grove_cd: to main repo
     grove()
@@ -640,7 +640,7 @@ fn test_path_outputs_worktree_path() {
         .current_dir(repo.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains(".git/wt/"));
+        .stdout(predicate::str::contains(".wt/"));
 }
 
 #[test]
@@ -1065,7 +1065,7 @@ fn test_config_copy_patterns() {
         .success();
 
     // Check that secret.env was copied
-    let wt_path = dir.path().join(".git/wt");
+    let wt_path = dir.path().join(".wt");
     let entries: Vec<_> = fs::read_dir(&wt_path)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -1109,7 +1109,7 @@ fn test_config_copy_glob_pattern() {
         .success();
 
     // Check that both files were copied
-    let wt_path = dir.path().join(".git/wt");
+    let wt_path = dir.path().join(".wt");
     let entries: Vec<_> = fs::read_dir(&wt_path)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -1152,7 +1152,7 @@ fn test_config_copy_empty() {
         .success();
 
     // Check that secret.env was NOT copied
-    let wt_path = dir.path().join(".git/wt");
+    let wt_path = dir.path().join(".wt");
     let entries: Vec<_> = fs::read_dir(&wt_path)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -1204,7 +1204,7 @@ fn test_add_copies_symlinked_directory() {
         .assert()
         .success();
 
-    let wt_path = dir.path().join(".git/wt");
+    let wt_path = dir.path().join(".wt");
     let entries: Vec<_> = fs::read_dir(&wt_path)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -1249,7 +1249,7 @@ marker = "touch {{path}}/hook-ran.marker"
         .success();
 
     // Check that hook ran (marker file exists)
-    let wt_path = dir.path().join(".git/wt");
+    let wt_path = dir.path().join(".wt");
     let entries: Vec<_> = fs::read_dir(&wt_path)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -1282,7 +1282,7 @@ info = "echo 'path={{path}} branch={{branch}} id={{id}} repo={{repo}}' > {{path}
         .success();
 
     // Read the vars file and check contents
-    let wt_path = dir.path().join(".git/wt");
+    let wt_path = dir.path().join(".wt");
     let entries: Vec<_> = fs::read_dir(&wt_path)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -1328,7 +1328,7 @@ third = "echo 'third' >> {{path}}/order.txt"
         .success();
 
     // Check order
-    let wt_path = dir.path().join(".git/wt");
+    let wt_path = dir.path().join(".wt");
     let entries: Vec<_> = fs::read_dir(&wt_path)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -1378,7 +1378,7 @@ task2 = "sleep 0.5 && echo 'task2' >> {{path}}/parallel.txt"
     );
 
     // Both tasks should have run
-    let wt_path = dir.path().join(".git/wt");
+    let wt_path = dir.path().join(".wt");
     let entries: Vec<_> = fs::read_dir(&wt_path)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -1440,7 +1440,7 @@ fn test_clean_removes_merged_worktree() {
         .success();
 
     // Make a commit on the feature branch
-    let wt_path = dir.path().join(".git/wt/1");
+    let wt_path = dir.path().join(".wt/1");
     fs::write(wt_path.join("feature.txt"), "feature work").unwrap();
     StdCommand::new("git")
         .args(["add", "."])
@@ -1485,7 +1485,7 @@ fn test_clean_detects_squash_merge() {
         .success();
 
     // Make commits on the feature branch
-    let wt_path = dir.path().join(".git/wt/1");
+    let wt_path = dir.path().join(".wt/1");
     fs::write(wt_path.join("feature.txt"), "feature work").unwrap();
     StdCommand::new("git")
         .args(["add", "."])
@@ -1545,7 +1545,7 @@ fn test_clean_skips_dirty_worktree() {
         .assert()
         .success();
 
-    let wt_path = dir.path().join(".git/wt/1");
+    let wt_path = dir.path().join(".wt/1");
 
     // Make uncommitted changes (dirty)
     fs::write(wt_path.join("dirty.txt"), "uncommitted").unwrap();
@@ -1576,7 +1576,7 @@ fn test_clean_skips_unmerged_worktree() {
         .success();
 
     // Make a commit on the feature branch (but don't merge)
-    let wt_path = dir.path().join(".git/wt/1");
+    let wt_path = dir.path().join(".wt/1");
     fs::write(wt_path.join("feature.txt"), "feature work").unwrap();
     StdCommand::new("git")
         .args(["add", "."])
@@ -1620,7 +1620,7 @@ fn test_clean_checks_upstream_branch() {
         .success();
 
     // Make a commit on the feature branch
-    let wt_path = dir.path().join(".git/wt/1");
+    let wt_path = dir.path().join(".wt/1");
     fs::write(wt_path.join("feature.txt"), "feature work").unwrap();
     StdCommand::new("git")
         .args(["add", "."])
@@ -1707,7 +1707,7 @@ fn test_done_from_merged_worktree_outputs_single_cd() {
         .success();
 
     // Make a commit on the feature branch
-    let wt_path = dir.path().join(".git/wt/1");
+    let wt_path = dir.path().join(".wt/1");
     fs::write(wt_path.join("feature.txt"), "feature work").unwrap();
     StdCommand::new("git")
         .args(["add", "."])
@@ -1785,7 +1785,7 @@ fn test_dash_c_with_add_command() {
         .stderr(predicate::str::contains("Worktree created"));
 
     // Verify worktree exists
-    assert!(repo.path().join(".git/wt/1").exists());
+    assert!(repo.path().join(".wt/1").exists());
 }
 
 #[test]
@@ -1940,7 +1940,7 @@ fn test_porcelain_list_child_reports_parent_id_and_cmp_base() {
         .assert()
         .success();
 
-    let parent_path = repo.path().join(".git/wt/1");
+    let parent_path = repo.path().join(".wt/1");
     grove()
         .args(["add", "child-wt"])
         .current_dir(&parent_path)
@@ -1973,7 +1973,7 @@ fn test_porcelain_list_marks_dirty_and_missing_flags() {
         .assert()
         .success();
 
-    let wt_path = repo.path().join(".git/wt/1");
+    let wt_path = repo.path().join(".wt/1");
 
     // Modify a tracked file and add an untracked one
     fs::write(wt_path.join("README.md"), "# Changed").unwrap();
@@ -2006,7 +2006,7 @@ fn test_porcelain_list_marks_orphans() {
         .assert()
         .success();
 
-    let parent_path = repo.path().join(".git/wt/1");
+    let parent_path = repo.path().join(".wt/1");
     grove()
         .args(["add", "the-child"])
         .current_dir(&parent_path)
@@ -2038,7 +2038,7 @@ fn test_porcelain_add_emits_created_and_wt() {
     let created = find_record(&records, "created").expect("created record");
     assert_eq!(created.len(), 4, "created\\t<id>\\t<branch>\\t<path>");
     assert_eq!(created[2], "feature");
-    assert!(created[3].ends_with(".git/wt/1"), "path: {}", created[3]);
+    assert!(created[3].ends_with(".wt/1"), "path: {}", created[3]);
 
     let wt = find_wt(&records, "feature").expect("wt record for the new worktree");
     assert_eq!(wt[1], created[1], "wt id matches created id");
@@ -2063,7 +2063,7 @@ fn test_porcelain_go_emits_cd_record_not_grove_cd_prefix() {
     let records = parse_porcelain(&stdout);
     let cd = find_record(&records, "cd").expect("cd record");
     assert_eq!(cd.len(), 2);
-    assert!(cd[1].ends_with(".git/wt/1"), "cd path: {}", cd[1]);
+    assert!(cd[1].ends_with(".wt/1"), "cd path: {}", cd[1]);
 
     find_record(&records, "created").expect("go on a new name also emits created");
 }
@@ -2085,7 +2085,7 @@ fn test_porcelain_go_existing_worktree_single_invocation() {
         "switching to an existing worktree must not report creation"
     );
     let cd = find_record(&records, "cd").expect("cd record");
-    assert!(cd[1].ends_with(".git/wt/1"));
+    assert!(cd[1].ends_with(".wt/1"));
     find_wt(&records, "feature").expect("wt record for the target");
 }
 
@@ -2119,7 +2119,7 @@ fn test_porcelain_remove_emits_removed_and_orphaned() {
         .assert()
         .success();
 
-    let parent_path = repo.path().join(".git/wt/1");
+    let parent_path = repo.path().join(".wt/1");
     grove()
         .args(["add", "survivor"])
         .current_dir(&parent_path)
@@ -2147,7 +2147,7 @@ fn test_porcelain_remove_current_emits_cd() {
         .assert()
         .success();
 
-    let wt_path = repo.path().join(".git/wt/1");
+    let wt_path = repo.path().join(".wt/1");
     let records = porcelain_records(&wt_path, &["rm", "current-wt"]);
 
     let cd = find_record(&records, "cd").expect("cd back to the repo root");
@@ -2164,7 +2164,7 @@ fn test_porcelain_clean_emits_removed_and_skipped() {
         .current_dir(repo.path())
         .assert()
         .success();
-    let merged_path = repo.path().join(".git/wt/1");
+    let merged_path = repo.path().join(".wt/1");
     fs::write(merged_path.join("f.txt"), "x").unwrap();
     StdCommand::new("git")
         .args(["add", "."])
@@ -2188,7 +2188,7 @@ fn test_porcelain_clean_emits_removed_and_skipped() {
         .current_dir(repo.path())
         .assert()
         .success();
-    let dirty_path = repo.path().join(".git/wt/2");
+    let dirty_path = repo.path().join(".wt/2");
     StdCommand::new("git")
         .args(["merge", "dirty-wt"])
         .current_dir(repo.path())
@@ -2257,7 +2257,7 @@ fn test_porcelain_path_emits_path_record() {
     let records = porcelain_records(repo.path(), &["path", "feature"]);
     let path = find_record(&records, "path").expect("path record");
     assert_eq!(path.len(), 2);
-    assert!(path[1].ends_with(".git/wt/1"), "path: {}", path[1]);
+    assert!(path[1].ends_with(".wt/1"), "path: {}", path[1]);
 }
 
 #[test]
@@ -2272,7 +2272,7 @@ fn test_porcelain_pull_emits_copied() {
         .assert()
         .success();
 
-    let wt_path = repo.path().join(".git/wt/1");
+    let wt_path = repo.path().join(".wt/1");
     let records = porcelain_records(&wt_path, &["pull"]);
 
     let copied = find_record(&records, "copied").expect("copied record");
@@ -2399,7 +2399,7 @@ fn test_porcelain_hook_stdout_does_not_pollute_records() {
 
     let known = [
         "repo", "wt", "cd", "created", "removed", "orphaned", "skipped", "imported", "pruned",
-        "fetched", "pulled", "copied", "copyfail", "path",
+        "fetched", "pulled", "copied", "copyfail", "path", "merged",
     ];
     for record in parse_porcelain(&stdout) {
         assert!(
@@ -2440,4 +2440,702 @@ fn test_pretty_output_unchanged_without_flag() {
         String::from_utf8_lossy(&output).trim().is_empty(),
         "without --porcelain, list writes nothing to stdout"
     );
+}
+
+// =============================================================================
+// FIELD FEEDBACK: prune/rm/.wt dir/merge
+// =============================================================================
+
+/// Run git in `dir`, asserting success
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = StdCommand::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Write `file` and commit it in `dir`
+fn commit_file(dir: &std::path::Path, file: &str, content: &str, msg: &str) {
+    fs::write(dir.join(file), content).unwrap();
+    git(dir, &["add", file]);
+    git(dir, &["commit", "-m", msg]);
+}
+
+/// Create a grove worktree `name` (optionally from `base`) with one commit
+fn add_with_commit(repo: &TempDir, name: &str, base: Option<&str>) -> std::path::PathBuf {
+    let mut args = vec!["add", name];
+    if let Some(b) = base {
+        args.push(b);
+    }
+    grove()
+        .args(&args)
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let wt = worktree_path(repo, name);
+    commit_file(
+        &wt,
+        &format!("{}.txt", name.replace('/', "_")),
+        name,
+        "feat: work",
+    );
+    wt
+}
+
+// --- prune -------------------------------------------------------------------
+
+#[test]
+fn test_prune_removes_db_entries_with_missing_dir() {
+    let repo = setup_git_repo();
+    grove()
+        .args(["add", "gone"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    fs::remove_dir_all(worktree_path(&repo, "gone")).unwrap();
+
+    let records = porcelain_records(repo.path(), &["prune"]);
+    let removed = find_record(&records, "removed").expect("removed record");
+    assert_eq!(removed[2], "gone");
+    assert_eq!(removed[3], "stale");
+    assert!(find_record(&records, "pruned").is_some());
+
+    grove()
+        .arg("list")
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("gone").not());
+}
+
+// --- list hint ---------------------------------------------------------------
+
+#[test]
+fn test_list_hints_prune_when_dir_missing() {
+    let repo = setup_git_repo();
+    grove()
+        .args(["add", "gone"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    fs::remove_dir_all(worktree_path(&repo, "gone")).unwrap();
+
+    grove()
+        .arg("list")
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("grove prune"));
+}
+
+#[test]
+fn test_list_no_prune_hint_when_all_present() {
+    let repo = setup_git_repo();
+    grove()
+        .args(["add", "here"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    grove()
+        .arg("list")
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("grove prune").not());
+}
+
+// --- rm ----------------------------------------------------------------------
+
+#[test]
+fn test_rm_unmerged_refuses_before_touching_worktree() {
+    let repo = setup_git_repo();
+    let wt = add_with_commit(&repo, "wip", None);
+
+    grove()
+        .args(["rm", "wip"])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not fully merged"));
+
+    assert!(wt.exists(), "refused rm must leave the worktree in place");
+    assert_eq!(
+        git(
+            repo.path(),
+            &["branch", "--list", "--format=%(refname:short)", "wip"]
+        ),
+        "wip"
+    );
+    grove()
+        .arg("list")
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("wip"));
+}
+
+#[test]
+fn test_rm_force_removes_unmerged() {
+    let repo = setup_git_repo();
+    let wt = add_with_commit(&repo, "wip", None);
+
+    grove()
+        .args(["rm", "--force", "wip"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    assert!(!wt.exists());
+    assert!(git(repo.path(), &["branch", "--list", "wip"]).is_empty());
+}
+
+#[test]
+fn test_rm_accepts_cherry_picked_branch() {
+    let repo = setup_git_repo();
+    let wt = add_with_commit(&repo, "picked", None);
+    let sha = git(&wt, &["rev-parse", "HEAD"]);
+    commit_file(repo.path(), "other.txt", "x", "chore: advance main");
+    git(repo.path(), &["cherry-pick", &sha]);
+
+    grove()
+        .args(["rm", "picked"])
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("already on main"));
+    assert!(!wt.exists());
+    assert!(git(repo.path(), &["branch", "--list", "picked"]).is_empty());
+}
+
+#[test]
+fn test_rm_merged_into_recorded_base() {
+    let repo = setup_git_repo();
+    git(repo.path(), &["branch", "develop"]);
+    let wt = add_with_commit(&repo, "feat", Some("develop"));
+    // Land feat on develop only; main never sees it
+    git(repo.path(), &["checkout", "develop"]);
+    git(
+        repo.path(),
+        &["merge", "--no-ff", "-m", "chore: merge", "feat"],
+    );
+    git(repo.path(), &["checkout", "main"]);
+
+    grove()
+        .args(["rm", "feat"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    assert!(!wt.exists());
+}
+
+#[test]
+fn test_rm_with_missing_dir_deletes_branch() {
+    let repo = setup_git_repo();
+    grove()
+        .args(["add", "vanished"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    fs::remove_dir_all(worktree_path(&repo, "vanished")).unwrap();
+
+    grove()
+        .args(["rm", "vanished"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    assert!(git(repo.path(), &["branch", "--list", "vanished"]).is_empty());
+}
+
+// --- worktree directory ------------------------------------------------------
+
+#[test]
+fn test_add_creates_worktree_in_dot_wt() {
+    let repo = setup_git_repo();
+    grove()
+        .args(["add", "feat"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let wt = worktree_path(&repo, "feat");
+    assert_eq!(wt, repo.path().join(".wt/1"));
+    assert!(wt.join("README.md").exists());
+}
+
+#[test]
+fn test_add_excludes_wt_dir_once() {
+    let repo = setup_git_repo();
+    grove()
+        .args(["add", "a"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    grove()
+        .args(["add", "b"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let exclude = fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
+    assert_eq!(exclude.lines().filter(|l| *l == "/.wt/").count(), 1);
+    assert!(
+        git(repo.path(), &["status", "--porcelain"]).is_empty(),
+        "main worktree must stay clean"
+    );
+}
+
+#[test]
+fn test_config_dir_option() {
+    let repo = setup_git_repo();
+    fs::write(repo.path().join(".grove.toml"), "dir = \"trees\"\n").unwrap();
+    grove()
+        .args(["add", "feat"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    assert_eq!(worktree_path(&repo, "feat"), repo.path().join("trees/1"));
+    let exclude = fs::read_to_string(repo.path().join(".git/info/exclude")).unwrap();
+    assert!(exclude.lines().any(|l| l == "/trees/"));
+}
+
+#[test]
+fn test_legacy_git_wt_worktree_still_works() {
+    let repo = setup_git_repo();
+    let legacy = repo.path().join(".git/wt/5");
+    fs::create_dir_all(repo.path().join(".git/wt")).unwrap();
+    git(
+        repo.path(),
+        &["worktree", "add", "-b", "legacy", legacy.to_str().unwrap()],
+    );
+    grove()
+        .arg("sync")
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    assert_eq!(worktree_path(&repo, "legacy"), legacy);
+    grove()
+        .arg("list")
+        .current_dir(&legacy)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("legacy ← here"));
+
+    // New worktrees go to .wt and don't collide with the imported id
+    grove()
+        .args(["add", "fresh"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    assert_eq!(worktree_path(&repo, "fresh"), repo.path().join(".wt/6"));
+
+    grove()
+        .args(["rm", "legacy"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    assert!(!legacy.exists());
+}
+
+#[test]
+fn test_sync_imports_from_dot_wt() {
+    let repo = setup_git_repo();
+    let p = repo.path().join(".wt/7");
+    fs::create_dir_all(repo.path().join(".wt")).unwrap();
+    git(
+        repo.path(),
+        &["worktree", "add", "-b", "outside", p.to_str().unwrap()],
+    );
+
+    grove()
+        .arg("sync")
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    assert_eq!(worktree_path(&repo, "outside"), p);
+}
+
+#[test]
+fn test_add_from_inside_dot_wt_records_parent() {
+    let repo = setup_git_repo();
+    grove()
+        .args(["add", "parent"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let parent = worktree_path(&repo, "parent");
+    fs::create_dir_all(parent.join("sub/dir")).unwrap();
+
+    grove()
+        .args(["add", "child"])
+        .current_dir(parent.join("sub/dir"))
+        .assert()
+        .success();
+
+    let records = porcelain_records(repo.path(), &["list"]);
+    let child = find_wt(&records, "child").expect("child record");
+    let parent_rec = find_wt(&records, "parent").expect("parent record");
+    assert_eq!(child[4], parent_rec[1]);
+}
+
+#[test]
+fn test_copyignored_does_not_copy_other_worktrees() {
+    let repo = setup_git_repo();
+    commit_gitignore(&repo, "*.log\n");
+    fs::write(repo.path().join(".grove.toml"), "copyignored = true\n").unwrap();
+    fs::write(repo.path().join("app.log"), "log").unwrap();
+
+    grove()
+        .args(["add", "first"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    grove()
+        .args(["add", "second"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    let second = worktree_path(&repo, "second");
+    assert!(second.join("app.log").exists());
+    assert!(
+        !second.join(".wt").exists(),
+        "sibling worktrees must never be copied into a new worktree"
+    );
+
+    // pull from main must not drag sibling worktrees in either
+    grove().arg("pull").current_dir(&second).assert().success();
+    assert!(!second.join(".wt").exists());
+}
+
+// --- merge -------------------------------------------------------------------
+
+#[test]
+fn test_merge_bare_errors_in_main() {
+    let repo = setup_git_repo();
+    grove()
+        .arg("merge")
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nothing to merge"));
+}
+
+#[test]
+fn test_merge_bare_in_worktree_hints_recorded_base() {
+    let repo = setup_git_repo();
+    git(repo.path(), &["branch", "develop"]);
+    let wt = add_with_commit(&repo, "feat", Some("develop"));
+
+    grove()
+        .arg("merge")
+        .current_dir(&wt)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nothing to merge"))
+        .stderr(predicate::str::contains("grove merge --into develop"));
+}
+
+#[test]
+fn test_merge_bare_hint_falls_back_to_reflog_for_legacy_rows() {
+    let repo = setup_git_repo();
+    git(repo.path(), &["branch", "develop"]);
+    let legacy = repo.path().join(".git/wt/9");
+    fs::create_dir_all(repo.path().join(".git/wt")).unwrap();
+    git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "old",
+            legacy.to_str().unwrap(),
+            "develop",
+        ],
+    );
+    grove()
+        .arg("sync")
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    grove()
+        .arg("merge")
+        .current_dir(&legacy)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("grove merge --into develop"));
+}
+
+#[test]
+fn test_merge_named_source_into_current_branch() {
+    let repo = setup_git_repo();
+    let wt = add_with_commit(&repo, "feat", None);
+
+    grove()
+        .args(["merge", "feat"])
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Merging feat → main"));
+
+    assert_eq!(
+        git(repo.path(), &["log", "-1", "--format=%s"]),
+        "chore: merge feat into main"
+    );
+    assert_eq!(
+        git(repo.path(), &["rev-list", "--count", "--merges", "HEAD"]),
+        "1"
+    );
+    assert!(repo.path().join("feat.txt").exists());
+    assert!(wt.exists(), "worktree is kept without --rm");
+}
+
+#[test]
+fn test_merge_into_from_worktree() {
+    let repo = setup_git_repo();
+    let wt = add_with_commit(&repo, "feat", None);
+
+    grove()
+        .args(["merge", "--into", "main"])
+        .current_dir(&wt)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Merging feat → main"));
+
+    assert!(repo.path().join("feat.txt").exists());
+}
+
+#[test]
+fn test_merge_into_from_main_errors() {
+    let repo = setup_git_repo();
+    add_with_commit(&repo, "feat", None);
+
+    grove()
+        .args(["merge", "--into", "feat"])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("name a source"));
+}
+
+#[test]
+fn test_merge_source_into_target_from_anywhere() {
+    let repo = setup_git_repo();
+    add_with_commit(&repo, "feat", None);
+    let other = add_with_commit(&repo, "other", None);
+
+    grove()
+        .args(["merge", "feat", "--into", "main"])
+        .current_dir(&other)
+        .assert()
+        .success();
+
+    assert!(repo.path().join("feat.txt").exists());
+    assert!(!other.join("feat.txt").exists());
+}
+
+#[test]
+fn test_merge_child_into_parent() {
+    let repo = setup_git_repo();
+    let parent = add_with_commit(&repo, "parent", None);
+    grove()
+        .args(["add", "child"])
+        .current_dir(&parent)
+        .assert()
+        .success();
+    let child = worktree_path(&repo, "child");
+    commit_file(&child, "child.txt", "c", "feat: child");
+
+    grove()
+        .args(["merge", "child"])
+        .current_dir(&parent)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Merging child → parent"));
+
+    assert!(parent.join("child.txt").exists());
+    assert!(!repo.path().join("child.txt").exists());
+}
+
+#[test]
+fn test_merge_same_branch_errors() {
+    let repo = setup_git_repo();
+    let wt = add_with_commit(&repo, "feat", None);
+
+    grove()
+        .args(["merge", "feat"])
+        .current_dir(&wt)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("into itself"));
+}
+
+#[test]
+fn test_merge_target_not_checked_out_errors() {
+    let repo = setup_git_repo();
+    git(repo.path(), &["branch", "develop"]);
+    add_with_commit(&repo, "feat", None);
+
+    grove()
+        .args(["merge", "feat", "--into", "develop"])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not checked out"));
+}
+
+#[test]
+fn test_merge_message_flag_and_config() {
+    let repo = setup_git_repo();
+    add_with_commit(&repo, "a", None);
+    add_with_commit(&repo, "b", None);
+
+    grove()
+        .args(["merge", "a", "-m", "feat: custom"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    assert_eq!(
+        git(repo.path(), &["log", "-1", "--format=%s"]),
+        "feat: custom"
+    );
+
+    fs::write(
+        repo.path().join(".grove.toml"),
+        "[merge]\nmessage = \"merge({{branch}}): into {{target}}\"\n",
+    )
+    .unwrap();
+    grove()
+        .args(["merge", "b"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    assert_eq!(
+        git(repo.path(), &["log", "-1", "--format=%s"]),
+        "merge(b): into main"
+    );
+}
+
+#[test]
+fn test_merge_dirty_target_refused() {
+    let repo = setup_git_repo();
+    add_with_commit(&repo, "feat", None);
+    fs::write(repo.path().join("README.md"), "dirty").unwrap();
+
+    grove()
+        .args(["merge", "feat"])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("uncommitted"));
+    assert_eq!(
+        git(repo.path(), &["rev-list", "--count", "--merges", "HEAD"]),
+        "0"
+    );
+}
+
+#[test]
+fn test_merge_dirty_source_refused() {
+    let repo = setup_git_repo();
+    let wt = add_with_commit(&repo, "feat", None);
+    fs::write(wt.join("README.md"), "dirty").unwrap();
+
+    grove()
+        .args(["merge", "feat"])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("uncommitted"));
+}
+
+#[test]
+fn test_merge_conflict_keeps_state_and_worktree() {
+    let repo = setup_git_repo();
+    let wt = add_with_commit(&repo, "feat", None);
+    commit_file(&wt, "README.md", "theirs", "feat: readme");
+    commit_file(repo.path(), "README.md", "ours", "chore: readme");
+
+    grove()
+        .args(["merge", "feat", "--rm"])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("git merge --abort"));
+
+    assert!(wt.exists(), "conflict must never remove the source");
+    assert!(repo.path().join(".git/MERGE_HEAD").exists());
+}
+
+#[test]
+fn test_merge_rm_removes_source() {
+    let repo = setup_git_repo();
+    let wt = add_with_commit(&repo, "feat", None);
+
+    grove()
+        .args(["merge", "feat", "--rm"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+
+    assert!(!wt.exists());
+    assert!(git(repo.path(), &["branch", "--list", "feat"]).is_empty());
+}
+
+#[test]
+fn test_merge_rm_from_inside_source_cds_to_target() {
+    let repo = setup_git_repo();
+    let wt = add_with_commit(&repo, "feat", None);
+
+    grove()
+        .args(["merge", "--into", "main", "--rm"])
+        .current_dir(&wt)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "__grove_cd:{}",
+            repo.path().display()
+        )));
+    assert!(!wt.exists());
+}
+
+#[test]
+fn test_merge_rm_child_into_parent() {
+    let repo = setup_git_repo();
+    let parent = add_with_commit(&repo, "parent", None);
+    grove()
+        .args(["add", "child"])
+        .current_dir(&parent)
+        .assert()
+        .success();
+    let child = worktree_path(&repo, "child");
+    commit_file(&child, "child.txt", "c", "feat: child");
+
+    grove()
+        .args(["merge", "child", "--rm"])
+        .current_dir(&parent)
+        .assert()
+        .success();
+    assert!(!child.exists());
+}
+
+#[test]
+fn test_porcelain_merge_emits_merged() {
+    let repo = setup_git_repo();
+    add_with_commit(&repo, "feat", None);
+
+    let records = porcelain_records(repo.path(), &["merge", "feat"]);
+    let merged = find_record(&records, "merged").expect("merged record");
+    assert_eq!(merged[1], "1");
+    assert_eq!(merged[2], "feat");
+    assert_eq!(merged[3], "main");
 }

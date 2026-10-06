@@ -11,6 +11,26 @@ pub struct Config {
     /// Copy every gitignored file to new worktrees, ignoring `copy` patterns
     pub copy_ignored: bool,
     pub hooks: Hooks,
+    /// Directory new worktrees are created in; relative to the repo root
+    /// unless absolute. `None` means the default, `.wt`.
+    pub dir: Option<String>,
+    /// Merge commit message template for `grove merge`
+    pub merge_message: Option<String>,
+}
+
+/// Default directory for new worktrees, relative to the repo root
+pub const DEFAULT_WORKTREE_DIR: &str = ".wt";
+
+/// Default merge commit message; conventional-commit friendly so commit-msg
+/// hooks that enforce it accept grove's merges.
+pub const DEFAULT_MERGE_MESSAGE: &str = "chore: merge {{branch}} into {{target}}";
+
+/// Template variables for the merge commit message
+pub struct MergeContext<'a> {
+    pub branch: &'a str,
+    pub target: &'a str,
+    pub id: &'a str,
+    pub repo: &'a Path,
 }
 
 /// All hook configurations
@@ -43,6 +63,25 @@ impl Config {
         let local = Self::load_local(repo_root).unwrap_or_default();
 
         Ok(Self::merge(global, local))
+    }
+
+    /// Directory new worktrees are created in
+    pub fn worktree_dir(&self, repo_root: &Path) -> PathBuf {
+        let dir = self.dir.as_deref().unwrap_or(DEFAULT_WORKTREE_DIR);
+        // `join` with an absolute path replaces the base, which is exactly the
+        // "absolute paths are used as-is" rule.
+        repo_root.join(dir)
+    }
+
+    /// Expand the merge commit message template
+    pub fn merge_message(&self, ctx: &MergeContext) -> String {
+        self.merge_message
+            .as_deref()
+            .unwrap_or(DEFAULT_MERGE_MESSAGE)
+            .replace("{{branch}}", ctx.branch)
+            .replace("{{target}}", ctx.target)
+            .replace("{{id}}", ctx.id)
+            .replace("{{repo}}", &ctx.repo.display().to_string())
     }
 
     /// Load global config from ~/.config/grove/config.toml
@@ -88,10 +127,18 @@ impl Config {
             ),
         };
 
+        let dir = local.dir.or(global.dir);
+        let merge_message = local
+            .merge
+            .and_then(|m| m.message)
+            .or(global.merge.and_then(|m| m.message));
+
         Self {
             copy,
             copy_ignored,
             hooks,
+            dir,
+            merge_message,
         }
     }
 }
@@ -146,6 +193,16 @@ struct RawConfig {
     #[serde(default)]
     copyignored: Option<bool>,
     hooks: Option<RawHooks>,
+    #[serde(default)]
+    dir: Option<String>,
+    #[serde(default)]
+    merge: Option<RawMerge>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawMerge {
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -247,6 +304,46 @@ copy = [".env*", ".terraform/"]
     fn test_parse_copyignored() {
         let raw: RawConfig = toml::from_str("copyignored = true").unwrap();
         assert_eq!(raw.copyignored, Some(true));
+    }
+
+    #[test]
+    fn test_worktree_dir_defaults_to_dot_wt() {
+        let dir = TempDir::new().unwrap();
+        let config = Config::load_isolated(dir.path()).unwrap();
+        assert_eq!(config.worktree_dir(dir.path()), dir.path().join(".wt"));
+    }
+
+    #[test]
+    fn test_worktree_dir_relative_and_absolute() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".grove.toml"), "dir = \"trees\"").unwrap();
+        let config = Config::load_isolated(dir.path()).unwrap();
+        assert_eq!(config.worktree_dir(dir.path()), dir.path().join("trees"));
+
+        std::fs::write(dir.path().join(".grove.toml"), "dir = \"/abs/trees\"").unwrap();
+        let config = Config::load_isolated(dir.path()).unwrap();
+        assert_eq!(config.worktree_dir(dir.path()), PathBuf::from("/abs/trees"));
+    }
+
+    #[test]
+    fn test_merge_message_default_and_override() {
+        let dir = TempDir::new().unwrap();
+        let config = Config::load_isolated(dir.path()).unwrap();
+        let ctx = MergeContext {
+            branch: "feat",
+            target: "main",
+            id: "3",
+            repo: Path::new("/repo"),
+        };
+        assert_eq!(config.merge_message(&ctx), "chore: merge feat into main");
+
+        std::fs::write(
+            dir.path().join(".grove.toml"),
+            "[merge]\nmessage = \"feat({{id}}): land {{branch}} on {{target}}\"",
+        )
+        .unwrap();
+        let config = Config::load_isolated(dir.path()).unwrap();
+        assert_eq!(config.merge_message(&ctx), "feat(3): land feat on main");
     }
 
     #[test]

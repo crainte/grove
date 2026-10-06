@@ -205,10 +205,103 @@ pub fn add(name: &str, base: Option<&str>) -> Result<()> {
 
 /// Remove worktree
 pub fn rm(name: &str, force: bool) -> Result<()> {
-    use colored::Colorize;
-
     let repo_root = git::find_repo_root()?;
     let meta = Meta::open(&repo_root)?;
+
+    // If we were inside the removed worktree, cd to main repo
+    if remove_worktree(&repo_root, &meta, name, force, None)? {
+        shell::output_cd(&repo_root);
+    }
+    Ok(())
+}
+
+/// The branch a worktree most likely merges back into.
+///
+/// Recorded base, then grove parent, then the branch's reflog (for rows
+/// created before bases were recorded), then the default branch. Candidates
+/// that no longer resolve to a commit are skipped.
+fn resolve_base(repo_root: &Path, meta: &Meta, id: &str, branch: &str) -> Result<String> {
+    let mut candidates = Vec::new();
+    if let Some(base) = meta.base_of(id)? {
+        candidates.push(base);
+    }
+    if let Some(parent) = meta.parent_of(id)?
+        && let Some(info) = meta.get_worktree(&parent)?
+    {
+        candidates.push(info.branch);
+    }
+    if let Some(from) = git::reflog_created_from(repo_root, branch) {
+        candidates.push(from);
+    }
+
+    if let Some(found) = candidates
+        .into_iter()
+        .find(|c| c != branch && git::rev_exists(repo_root, c))
+    {
+        return Ok(found);
+    }
+    git::default_branch(repo_root)
+}
+
+/// Refuse to remove a branch whose work exists nowhere else.
+///
+/// Runs before anything is touched, so a refusal leaves the worktree intact.
+/// Beyond git's own notion of merged (reachable from HEAD or its upstream),
+/// this accepts branches reachable from their base or `merged_into`, and
+/// branches whose content is already on the base under different commits
+/// (cherry-picked or squashed).
+fn check_branch_merged(
+    repo_root: &Path,
+    meta: &Meta,
+    id: &str,
+    branch: &str,
+    merged_into: Option<&str>,
+) -> Result<()> {
+    use colored::Colorize;
+
+    let base = resolve_base(repo_root, meta, id, branch)?;
+    let upstream = git::upstream_branch(repo_root, branch);
+
+    let reachable = std::iter::once("HEAD")
+        .chain(merged_into)
+        .chain(upstream.as_deref())
+        .chain(std::iter::once(base.as_str()))
+        .any(|target| git::is_ancestor(repo_root, branch, target));
+    if reachable {
+        return Ok(());
+    }
+
+    if git::is_branch_merged(repo_root, branch, &base)? {
+        note!(
+            "  {}",
+            format!(
+                "Content of '{}' already on {} (cherry-picked or squashed)",
+                branch, base
+            )
+            .dimmed()
+        );
+        return Ok(());
+    }
+
+    bail!(
+        "Branch '{}' not fully merged. Use 'grove rm --force {}' to remove anyway.",
+        branch,
+        branch
+    )
+}
+
+/// Remove a grove worktree and its branch. Returns true if the process cwd
+/// was inside it, so the caller can pick where to send the shell.
+fn remove_worktree(
+    repo_root: &Path,
+    meta: &Meta,
+    name: &str,
+    force: bool,
+    merged_into: Option<&str>,
+) -> Result<bool> {
+    use colored::Colorize;
+
+    let repo_root = repo_root.to_path_buf();
     let config = Config::load(&repo_root)?;
 
     // Find the worktree
@@ -232,6 +325,11 @@ pub fn rm(name: &str, force: bool) -> Result<()> {
             "Worktree '{}' has uncommitted changes. Use --force to remove anyway.",
             name
         );
+    }
+
+    let branch_exists = git::branch_exists(&repo_root, name)?;
+    if !force && branch_exists {
+        check_branch_merged(&repo_root, meta, &id, name, merged_into)?;
     }
 
     // Build hook context
@@ -260,11 +358,16 @@ pub fn rm(name: &str, force: bool) -> Result<()> {
     // Remove git worktree first (branch can't be deleted while worktree exists)
     if wt_path.exists() {
         git::worktree_remove(&repo_root, &wt_path, force)?;
+    } else {
+        // Directory already gone: drop git's stale record, or the branch
+        // delete fails with "used by worktree"
+        git::worktree_prune(&repo_root)?;
     }
 
-    // Delete the branch
-    if git::branch_exists(&repo_root, name)? {
-        git::branch_delete(&repo_root, name, force)?;
+    // Delete the branch. Merged-ness was verified above (or --force given),
+    // and git -d would reject cherry-picked/squashed branches we accepted.
+    if branch_exists {
+        git::branch_delete(&repo_root, name, true)?;
     }
 
     // Remove from metadata
@@ -280,9 +383,158 @@ pub fn rm(name: &str, force: bool) -> Result<()> {
         porcelain::record(&["orphaned", child_id, &child.branch]);
     }
 
-    // If we were inside the removed worktree, cd to main repo
-    if removing_current {
-        shell::output_cd(&repo_root);
+    Ok(removing_current)
+}
+
+/// Merge a branch into another, git-style: a named branch is always the
+/// source and `into` is always the target. Nothing is implied: with neither,
+/// this fails and suggests a command.
+pub fn merge(
+    source: Option<&str>,
+    into: Option<&str>,
+    message: Option<&str>,
+    rm_after: bool,
+) -> Result<()> {
+    use colored::Colorize;
+
+    let repo_root = git::find_repo_root()?;
+    let meta = Meta::open(&repo_root)?;
+    let config = Config::load(&repo_root)?;
+    let current_id = current_worktree_id(&repo_root)?;
+    let cwd = env::current_dir()?;
+
+    if source.is_none() && into.is_none() {
+        let hint = match current_id.as_deref() {
+            Some(id) => {
+                let branch = git::current_branch(&cwd).unwrap_or_default();
+                format!(
+                    "grove merge --into {}   (merge {} into its base)",
+                    resolve_base(&repo_root, &meta, id, &branch)?,
+                    branch
+                )
+            }
+            None => "grove merge <worktree>   (bring a worktree into this branch)".to_string(),
+        };
+        bail!(
+            "nothing to merge; name a source or a target\n  hint: {}",
+            hint
+        );
+    }
+
+    let detached = || anyhow::anyhow!("no branch checked out here (detached HEAD)");
+
+    let source = match source {
+        Some(s) => s.to_string(),
+        None => {
+            if current_id.is_none() {
+                bail!(
+                    "--into merges the current worktree, but this is the main worktree; \
+                     name a source: grove merge <worktree> --into <target>"
+                );
+            }
+            git::current_branch(&cwd).ok_or_else(detached)?
+        }
+    };
+    let target = match into {
+        Some(t) => t.to_string(),
+        None => git::current_branch(&cwd).ok_or_else(detached)?,
+    };
+
+    if source == target {
+        bail!("cannot merge '{}' into itself", source);
+    }
+    if !git::branch_exists(&repo_root, &source)? {
+        bail!("branch '{}' not found", source);
+    }
+
+    let source_id = meta.find_by_branch(&source)?;
+    if rm_after && source_id.is_none() {
+        bail!("--rm needs a grove worktree, and '{}' is not one", source);
+    }
+
+    // The merge happens wherever the target is checked out, which may not be
+    // where we are; make sure that tree can take it.
+    let git_worktrees = git::worktree_list(&repo_root)?;
+    let checkout_of = |branch: &str| {
+        git_worktrees
+            .iter()
+            .find(|w| w.branch.as_deref() == Some(branch))
+            .map(|w| w.path.clone())
+    };
+    let target_path = checkout_of(&target).ok_or_else(|| {
+        anyhow::anyhow!(
+            "target '{}' is not checked out in any worktree; check it out or create one with 'grove add'",
+            target
+        )
+    })?;
+
+    if git::merge_in_progress(&target_path) {
+        bail!(
+            "a merge is already in progress in {}; finish or abort it first",
+            target_path.display()
+        );
+    }
+    let (target_dirty, _) = git::worktree_status(&target_path).unwrap_or((false, false));
+    if target_dirty {
+        bail!(
+            "target '{}' has uncommitted changes in {}; commit or stash them first",
+            target,
+            target_path.display()
+        );
+    }
+    if let Some(source_path) = checkout_of(&source).filter(|p| p.exists()) {
+        let (source_dirty, _) = git::worktree_status(&source_path).unwrap_or((false, false));
+        if source_dirty {
+            bail!(
+                "source '{}' has uncommitted changes in {}; commit them first, they would not be merged",
+                source,
+                source_path.display()
+            );
+        }
+    }
+
+    let message = match message {
+        Some(m) => m.to_string(),
+        None => config.merge_message(&crate::config::MergeContext {
+            branch: &source,
+            target: &target,
+            id: source_id.as_deref().unwrap_or(""),
+            repo: &repo_root,
+        }),
+    };
+
+    note!("{}", format!("⟳ Merging {} → {}", source, target).cyan());
+    if !git::merge_no_ff(&target_path, &source, &message)? {
+        let kept = if rm_after {
+            "\n  --rm skipped: the worktree was kept"
+        } else {
+            ""
+        };
+        if git::merge_in_progress(&target_path) {
+            bail!(
+                "merge of '{}' into '{}' stopped in {}\n  fix it (conflicts or a rejected commit message) and commit, or run 'git merge --abort' there{}",
+                source,
+                target,
+                target_path.display(),
+                kept
+            );
+        }
+        bail!("git merge of '{}' into '{}' failed{}", source, target, kept);
+    }
+
+    note!(
+        "{}",
+        format!("✓ Merged '{}' into '{}'", source, target).green()
+    );
+    porcelain::record(&[
+        "merged",
+        source_id.as_deref().unwrap_or(porcelain::NONE),
+        &source,
+        &target,
+    ]);
+
+    if rm_after && remove_worktree(&repo_root, &meta, &source, false, Some(&target))? {
+        shell::output_cd(&target_path);
     }
 
     Ok(())
@@ -631,6 +883,12 @@ pub fn list() -> Result<()> {
 
     // Footer suggestion
     note!();
+    if entries.iter().any(|e| !e.status.dir_exists) {
+        note!(
+            "{}",
+            "⚠ Entries marked ✗ are missing on disk; run 'grove prune' to remove them".yellow()
+        );
+    }
     note!(
         "{}",
         "💡 Use 'grove go <name>' to switch, 'grove rm <name>' to remove".bright_blue()
@@ -791,8 +1049,17 @@ pub fn prune() -> Result<()> {
     use colored::Colorize;
 
     let repo_root = git::find_repo_root()?;
+    let meta = Meta::open(&repo_root)?;
     note!("{}", "🧹 Pruning stale worktree references...".yellow());
     git::worktree_prune(&repo_root)?;
+
+    // Git has forgotten its stale worktrees; now drop grove's rows for them.
+    let removed = meta.remove_stale(&git::worktree_list(&repo_root)?)?;
+    for (id, branch) in &removed {
+        note!("  {}", format!("Removed stale entry '{}'", branch).dimmed());
+        porcelain::record(&["removed", id, branch, "stale"]);
+    }
+
     note!("{}", "✓ Pruned".green());
     porcelain::record(&["pruned"]);
     Ok(())
@@ -804,12 +1071,13 @@ pub fn sync() -> Result<()> {
 
     let repo_root = git::find_repo_root()?;
     let meta = Meta::open(&repo_root)?;
+    let config = Config::load(&repo_root)?;
 
     // Get worktrees from git
     let git_worktrees = git::worktree_list(&repo_root)?;
 
     // Sync
-    let report = meta.sync(&git_worktrees)?;
+    let report = meta.sync(&git_worktrees, &[config.worktree_dir(&repo_root)])?;
 
     if !report.imported.is_empty() || !report.removed.is_empty() {
         note!(
@@ -1086,8 +1354,17 @@ fn create_worktree(
         );
     }
 
+    // Keep in-repo worktrees out of `git status` and `git add .` locally,
+    // without touching the tracked .gitignore
+    let wt_dir = config.worktree_dir(repo_root);
+    if let Ok(rel) = wt_dir.strip_prefix(repo_root)
+        && !rel.as_os_str().is_empty()
+    {
+        git::ensure_excluded(repo_root, &format!("/{}/", rel.display()))?;
+    }
+
     // Add to metadata first to get the ID (atomic in SQLite)
-    let id = meta.add_worktree(branch, parent_id)?;
+    let id = meta.add_worktree(branch, parent_id, Some(&base_branch), Some(&wt_dir))?;
     let wt_path = meta.worktree_path(&id);
 
     // Build hook context (path doesn't exist yet for pre-create)
@@ -1159,17 +1436,7 @@ fn create_worktree(
 /// Get the current worktree ID from cwd (if in a worktree)
 fn current_worktree_id(repo_root: &Path) -> Result<Option<String>> {
     let cwd = env::current_dir()?;
-    let wt_dir = git::wt_dir(repo_root);
-
-    // Check if cwd is under .git/wt/<id>/
-    if let Ok(relative) = cwd.strip_prefix(&wt_dir) {
-        // First component is the worktree ID
-        if let Some(id) = relative.iter().next() {
-            return Ok(Some(id.to_string_lossy().to_string()));
-        }
-    }
-
-    Ok(None)
+    Meta::open(repo_root)?.find_by_path(&cwd)
 }
 
 /// Summarize a list of files for display

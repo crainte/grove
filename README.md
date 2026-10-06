@@ -53,8 +53,17 @@ g feature/auth main
 # List all worktrees
 g ls
 
-# Remove a worktree
+# Remove a worktree (refuses unless its work is merged; --force overrides)
 g rm feature/auth
+
+# Merge a worktree (--no-ff), git-style: the name is the source
+g merge feature/auth                # into the branch checked out here
+g merge --into main                 # this worktree into main
+g merge feature/auth --into main    # from anywhere
+g merge feature/auth --rm           # and remove the worktree afterwards
+
+# Drop entries whose directories are gone
+g prune
 
 # Clean up merged worktrees
 g clean
@@ -78,6 +87,24 @@ g ../other-feature      # go up and create sibling
 
 Context-aware lookup finds children first - `g sub-task` from within `feature/auth` finds the child before any top-level `sub-task`.
 
+### Merging
+
+`grove merge` follows `git merge`: a name you pass is always the **source**,
+and `--into` is always the **target**. With neither, it fails and suggests
+`grove merge --into <base>` using the branch the worktree was created from.
+
+The merge runs in whichever worktree has the target checked out, which need
+not be the one you are in. It refuses if either side has uncommitted changes.
+On a conflict (or a rejected commit message) the merge is left in progress
+for you to finish or `git merge --abort`, and `--rm` is skipped.
+
+### Removing
+
+`grove rm` checks before touching anything that the branch's work exists
+elsewhere: reachable from HEAD, its upstream, or its base, or with its content
+already on the base (cherry-picked or squashed). Otherwise it refuses and
+suggests `--force`.
+
 ### Machine-readable output
 
 The global `--porcelain` flag replaces the decorated rendering with
@@ -87,7 +114,7 @@ tab-separated records on stdout, for scripts and tools:
 $ grove --porcelain list
 repo	/home/you/project	main
 wt	-	main	/home/you/project	-	pc	0	2	origin/main
-wt	1	feature/auth	/home/you/project/.git/wt/1	-	mu	2	0	main
+wt	1	feature/auth	/home/you/project/.wt/1	-	mu	2	0	main
 ```
 
 Each `wt` record is `id`, `branch`, `path`, `parent-id`, `flags`, `ahead`,
@@ -115,6 +142,15 @@ copy = [".env*", ".terraform/", ".mise.local.toml"]
 # Or copy every .gitignored file (default: false).
 # When true, this supersedes `copy`.
 copyignored = true
+
+# Where new worktrees go (default: ".wt"), relative to the repo root.
+# Absolute paths are used as-is; ids are per repo, so don't share one
+# absolute dir between repos.
+dir = ".wt"
+
+# Merge commit message for `grove merge` (-m overrides)
+[merge]
+message = "chore: merge {{branch}} into {{target}}"
 
 # Hooks - blocks run sequentially, tasks within a block run in parallel
 [[hooks.post-create]]
@@ -144,21 +180,32 @@ while `copyignored` is overridden outright by the more local config.
 - `{{id}}` - worktree ID
 - `{{repo}}` - repo root path
 
+The merge message supports `{{branch}}` (source), `{{target}}`, `{{id}}`, and
+`{{repo}}`. The default is a conventional commit so commit-msg hooks that
+enforce one accept it.
+
 ## Storage Layout
 
-Worktrees live in `.git/wt/` with short IDs, keeping them inside your repo tree so config files are inherited:
+Worktrees live in `.wt/` with short IDs, keeping them inside your repo tree so
+config files are inherited. grove adds `/.wt/` to `.git/info/exclude` (local,
+untracked) so they never show up in `git status` or get committed:
 
 ```
 repo/
 ├── .git/
 │   └── wt/
-│       ├── grove.db     # worktree metadata
-│       ├── a1/          # feature/auth
-│       └── b2/          # sub-task (child of a1)
+│       └── grove.db     # worktree metadata
+├── .wt/
+│   ├── 1/               # feature/auth
+│   └── 2/               # sub-task (child of 1)
 ├── .grove.toml          # local config
 ├── .mise.toml           # inherited by all worktrees
 └── src/
 ```
+
+Earlier versions stored worktrees in `.git/wt/<id>`, where tools that skip
+paths containing `.git` (Vite/Vitest, file watchers) misbehave. Existing
+worktrees there keep working; new ones go to `.wt/`.
 
 ## License
 

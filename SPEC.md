@@ -6,7 +6,7 @@ A fast, simple git worktree manager written in Rust.
 
 1. **Simple distribution** — single binary, no runtime dependencies
 2. **Clean branch names** — no encoding restrictions, any valid git branch name works
-3. **Flat storage** — worktrees live in `.git/wt/<id>/`, hierarchy in metadata
+3. **Flat storage** — worktrees live in `.wt/<id>/`, hierarchy in metadata
 4. **Shell integration** — `eval "$(grove init bash)"` for seamless `cd`
 5. **Config inheritance** — `.mise.toml`, `.env` inherited from repo root
 
@@ -15,40 +15,33 @@ A fast, simple git worktree manager written in Rust.
 ```
 repo/
 ├── .git/
+│   ├── info/exclude         # grove adds /.wt/ here
 │   └── wt/
-│       ├── meta.json        # worktree metadata
-│       ├── a1/              # worktree directory (short id)
-│       ├── b2/
-│       └── c3/
+│       └── grove.db         # worktree metadata (SQLite)
+├── .wt/                     # configurable with `dir`
+│   ├── 1/                   # worktree directory (short id)
+│   ├── 2/
+│   └── 3/
 ├── .mise.toml               # inherited by worktrees
 └── src/
 ```
 
-### meta.json
+The worktree directory is inside the repo so config files are inherited, and
+outside `.git/` because many tools (Vite/Vitest, watchers, linters) skip any
+path containing `.git`. It is excluded through `.git/info/exclude`, which is
+local and never produces a diff in the tracked `.gitignore`.
 
-```json
-{
-  "version": 1,
-  "worktrees": {
-    "a1": {
-      "branch": "feature/auth",
-      "parent": null,
-      "created": "2024-01-15T10:30:00Z"
-    },
-    "b2": {
-      "branch": "sub-task",
-      "parent": "a1",
-      "created": "2024-01-15T11:00:00Z"
-    },
-    "c3": {
-      "branch": "refactor/cleanup",
-      "parent": "a1",
-      "created": "2024-01-15T12:00:00Z"
-    }
-  },
-  "next_id": 4
-}
-```
+### grove.db
+
+`worktrees(id, branch, parent, created, path, base)`, schema version in
+`PRAGMA user_version`.
+
+- `path` — absolute worktree path. `NULL` for rows created before v1, which
+  resolve to the legacy `.git/wt/<id>`. Changing `dir` only affects new
+  worktrees.
+- `base` — the branch the worktree was created from. For rows without one,
+  grove falls back to the grove parent's branch, then the branch reflog
+  (`branch: Created from X`), then the default branch.
 
 ## Commands
 
@@ -64,8 +57,9 @@ grove add <name> [base] # Create without switching
 
 ```bash
 grove rm <name>         # Remove worktree and branch
+grove merge [src] [--into tgt] [-m msg] [--rm]  # Merge src into tgt (--no-ff)
 grove list              # Show worktree tree
-grove prune             # Clean stale references
+grove prune             # git worktree prune, then drop rows whose dir is gone
 grove clean [branch]    # Remove merged worktrees
 grove done              # cd to main, pull, clean
 ```
@@ -106,6 +100,13 @@ copy = [".env*", ".terraform/", ".mise.local.toml"]
 # Or copy every .gitignored file (default: false, supersedes `copy`)
 copyignored = true
 
+# Directory for new worktrees (default ".wt"; relative to repo root)
+dir = ".wt"
+
+# grove merge commit message; {{branch}} {{target}} {{id}} {{repo}}
+[merge]
+message = "chore: merge {{branch}} into {{target}}"
+
 # Hooks: blocks run sequentially, tasks within a block run in parallel
 [[hooks.post-create]]
 trust = "mise trust {{path}}/mise.toml"
@@ -115,8 +116,10 @@ deps = "npm ci"
 backup = "cp -r {{path}}/data {{repo}}/backup/"
 ```
 
-`copy` patterns from the local config extend the global list; `copyignored` is
-overridden outright by the more local config. Hooks support the template
+`copy` patterns from the local config extend the global list; `copyignored`,
+`dir`, and `merge.message` are overridden outright by the more local config.
+Ignored nested repositories and worktrees (e.g. siblings under `.wt/`) are
+never copied. Hooks support the template
 variables `{{path}}`, `{{branch}}`, `{{id}}`, and `{{repo}}`.
 
 ## Shell Integration Protocol
@@ -150,6 +153,7 @@ wt        <id>  <branch>  <abspath>  <parent-id>  <flags>  <ahead>  <behind>  <c
 cd        <abspath>
 created   <id>  <branch>  <abspath>
 removed   <id>  <branch>  <reason>          # explicit | merged:<ref> | stale
+merged    <id>  <branch>  <target>          # id is - if source is not a grove worktree
 orphaned  <id>  <branch>
 skipped   <id>  <branch>  <reason>          # dirty
 imported  <id>  <branch>
@@ -192,7 +196,8 @@ default branch. Bare counts are ambiguous without it.
 | `rm` | `removed`, `orphaned`*, `cd` if the cwd was inside it |
 | `clean` | `removed`*, `skipped`*, `cd` if the current worktree went |
 | `done` | `fetched`, `pulled`, then `clean` records, `cd` |
-| `prune` | `pruned` |
+| `prune` | `removed`* (reason `stale`), `pruned` |
+| `merge` | `merged`; with `--rm` also `removed`, `orphaned`*, `cd` if the cwd was inside the source |
 | `sync` | `imported`*, `removed`* |
 | `pull` / `push` | `copied`, `copyfail`* |
 | `path` | `path` |
@@ -233,11 +238,32 @@ The `list` command renders the tree:
 
 When inside worktree `feature`, `grove sub` finds the child `sub` before a top-level `sub`.
 
+## Merge
+
+Git semantics: a positional name is always the source, `--into` always the
+target. Nothing is implied.
+
+| Invocation | Source → target |
+|---|---|
+| `grove merge` | Error; in a grove worktree the hint suggests `--into <base>` |
+| `grove merge <src>` | `<src>` → branch checked out in the cwd |
+| `grove merge --into <tgt>` | current worktree → `<tgt>` (error in the main worktree) |
+| `grove merge <src> --into <tgt>` | `<src>` → `<tgt>`, from anywhere |
+
+The merge is `git merge --no-ff -m <msg>` run in the worktree that has the
+target checked out, so commit-msg hooks apply. It refuses when the target is
+not checked out anywhere, when either side has tracked changes, when a merge
+is already in progress there, or when source equals target. On failure the
+merge state is left for the user and `--rm` is skipped.
+
 ## Error Handling
 
 - Missing worktree → suggest `grove add`
 - Branch exists → offer to checkout existing or pick new name
 - Dirty worktree on rm → warn, require `--force`
+- Unmerged branch on rm → refuse before removing anything, require `--force`.
+  Merged means reachable from HEAD, its upstream, or its base, or content
+  already on the base (cherry-pick/squash).
 
 ## Testing Strategy
 

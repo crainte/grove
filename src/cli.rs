@@ -65,6 +65,27 @@ enum Commands {
         force: bool,
     },
 
+    /// Merge a worktree's branch (--no-ff), git-style: <SOURCE> into here
+    #[command(after_help = "Examples:\n  \
+        grove merge feat                 merge feat into the branch checked out here\n  \
+        grove merge --into main          merge this worktree into main\n  \
+        grove merge feat --into main     merge feat into main, from anywhere\n\n\
+        The merge runs in whichever worktree has the target checked out.")]
+    Merge {
+        /// Branch to merge (default with --into: the current worktree)
+        #[arg(value_name = "SOURCE")]
+        source: Option<String>,
+        /// Branch to merge into (default: the branch checked out here)
+        #[arg(long, value_name = "TARGET")]
+        into: Option<String>,
+        /// Commit message (default: [merge] message template)
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Remove the source worktree and branch after a successful merge
+        #[arg(long)]
+        rm: bool,
+    },
+
     /// List worktrees
     #[command(visible_alias = "ls")]
     List,
@@ -144,6 +165,12 @@ impl Cli {
             Some(Commands::Go { name: None, .. }) => commands::go_interactive(),
             Some(Commands::Add { name, base }) => commands::add(name, base.as_deref()),
             Some(Commands::Remove { name, force }) => commands::rm(name, *force),
+            Some(Commands::Merge {
+                source,
+                into,
+                message,
+                rm,
+            }) => commands::merge(source.as_deref(), into.as_deref(), message.as_deref(), *rm),
             Some(Commands::List) => commands::list(),
             Some(Commands::Prune) => commands::prune(),
             Some(Commands::Sync) => commands::sync(),
