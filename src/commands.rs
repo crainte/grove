@@ -320,6 +320,22 @@ fn remove_worktree(
         .ok_or_else(|| anyhow::anyhow!("Worktree '{}' not found", name))?;
 
     let wt_path = meta.worktree_path(&id);
+    let is_git_worktree = git::worktree_list(&repo_root)?
+        .iter()
+        .any(|worktree| worktree.path == wt_path);
+    if !is_git_worktree {
+        note!(
+            "{}",
+            format!(
+                "'{}' is not a worktree; removing stale Grove database entry",
+                name
+            )
+            .yellow()
+        );
+        meta.remove_worktree(&id)?;
+        porcelain::record(&["removed", &id, name, "stale"]);
+        return Ok(false);
+    }
 
     // Check if we're inside the worktree we're about to remove
     let cwd = std::env::current_dir().ok();
