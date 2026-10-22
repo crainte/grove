@@ -749,6 +749,82 @@ fn test_prune_succeeds() {
         .stderr(predicate::str::contains("Pruned"));
 }
 
+#[test]
+fn test_prune_removes_metadata_for_existing_non_worktree_path() {
+    let repo = setup_git_repo();
+    grove()
+        .args(["add", "stale-prune"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let path = worktree_path(&repo, "stale-prune");
+    let removed = StdCommand::new("git")
+        .args(["worktree", "remove", path.to_str().unwrap()])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(removed.status.success());
+    fs::create_dir_all(&path).unwrap();
+    fs::write(path.join("keep.txt"), "ordinary directory").unwrap();
+
+    grove()
+        .arg("prune")
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("stale-prune"));
+
+    grove()
+        .arg("list")
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("stale-prune").not());
+    assert!(path.join("keep.txt").is_file());
+}
+
+#[test]
+fn test_rm_cleans_metadata_for_existing_non_worktree_path() {
+    let repo = setup_git_repo();
+    grove()
+        .args(["add", "stale-rm"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let path = worktree_path(&repo, "stale-rm");
+    let removed = StdCommand::new("git")
+        .args(["worktree", "remove", path.to_str().unwrap()])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(removed.status.success());
+    fs::create_dir_all(&path).unwrap();
+    fs::write(path.join("keep.txt"), "ordinary directory").unwrap();
+
+    grove()
+        .args(["rm", "stale-rm"])
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("not a worktree"));
+
+    grove()
+        .arg("list")
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("stale-rm").not());
+    assert!(path.join("keep.txt").is_file());
+    assert!(
+        StdCommand::new("git")
+            .args(["show-ref", "--verify", "--quiet", "refs/heads/stale-rm"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
 // =============================================================================
 // SPECIAL BRANCH NAME TESTS
 // =============================================================================

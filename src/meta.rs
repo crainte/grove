@@ -507,8 +507,9 @@ impl Meta {
         Ok(renamed)
     }
 
-    /// Drop rows whose directory is gone and which git no longer lists as a
-    /// worktree. Returns the (id, branch) pairs removed.
+    /// Drop rows whose path Git no longer lists as a worktree. The directory
+    /// may still exist as an ordinary directory and must not keep stale Grove
+    /// metadata alive.
     pub fn remove_stale(
         &self,
         git_worktrees: &[crate::git::GitWorktree],
@@ -518,7 +519,7 @@ impl Meta {
             let our_path = self.worktree_path(&id);
             let exists_in_git = git_worktrees.iter().any(|wt| wt.path == our_path);
 
-            if !exists_in_git && !our_path.exists() {
+            if !exists_in_git {
                 self.conn
                     .execute("DELETE FROM worktrees WHERE id = ?1", params![id])?;
                 removed.push((id, info.branch));
