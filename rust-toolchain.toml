@@ -1,0 +1,6 @@
+# Pinned so CI and local builds agree. Bump the channel here deliberately
+# (and re-run clippy with -D warnings) instead of tracking `stable`.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
