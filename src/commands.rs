@@ -1143,6 +1143,16 @@ pub fn clean(target_branch: Option<&str>) -> Result<()> {
     let meta = open_meta(&repo_root)?;
     let main_branch = git::default_branch(&repo_root)?;
     let target = target_branch.unwrap_or(&main_branch);
+    // A merged PR may be visible in the fetched remote-tracking default branch
+    // before the local default branch is pulled. Never use a remote ref that is
+    // behind or diverged from local, and honor an explicitly supplied target.
+    let remote_target = format!("origin/{}", main_branch);
+    let target = if target_branch.is_none() && git::is_ancestor(&repo_root, target, &remote_target)
+    {
+        remote_target.as_str()
+    } else {
+        target
+    };
 
     // Track if we're removing the current worktree
     let current_id = current_worktree_id(&repo_root)?;
@@ -1169,9 +1179,13 @@ pub fn clean(target_branch: Option<&str>) -> Result<()> {
             continue;
         }
 
-        // Determine target: use branch's upstream if available, otherwise fall back to target
-        let check_against =
-            git::upstream_branch(&repo_root, &info.branch).unwrap_or_else(|| target.to_string());
+        // A branch tracking its own remote is not merged just because it was pushed.
+        // Only use the upstream as a merge target when it is a different branch.
+        let check_against = git::upstream_branch(&repo_root, &info.branch)
+            .filter(|upstream| {
+                upstream != &info.branch && !upstream.ends_with(&format!("/{}", info.branch))
+            })
+            .unwrap_or_else(|| target.to_string());
 
         // Check if branch is merged
         if git::is_branch_merged(&repo_root, &info.branch, &check_against)? {
