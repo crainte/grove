@@ -1678,6 +1678,250 @@ fn test_clean_skips_unmerged_worktree() {
 }
 
 #[test]
+fn test_clean_does_not_treat_own_upstream_as_merge_target() {
+    let remote = TempDir::new().unwrap();
+    let repo = setup_git_repo();
+    assert!(
+        StdCommand::new("git")
+            .args(["init", "--bare", remote.path().to_str().unwrap()])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["remote", "add", "origin", remote.path().to_str().unwrap()])
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let wt = repo.path().join(".wt/1");
+    fs::write(wt.join("feature.txt"), "not merged").unwrap();
+    assert!(
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(&wt)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["commit", "-m", "feature commit"])
+            .current_dir(&wt)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["push", "-u", "origin", "feature"])
+            .current_dir(&wt)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+
+    grove()
+        .args(["clean"])
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("No merged worktrees to clean"));
+    assert!(
+        wt.exists(),
+        "a pushed but unmerged worktree must be preserved"
+    );
+}
+
+#[test]
+fn test_clean_does_not_treat_fork_upstream_as_merge_target() {
+    let remote = TempDir::new().unwrap();
+    let repo = setup_git_repo();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        assert!(
+            StdCommand::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    };
+    git(
+        repo.path(),
+        &["init", "--bare", remote.path().to_str().unwrap()],
+    );
+    git(
+        repo.path(),
+        &["remote", "add", "fork", remote.path().to_str().unwrap()],
+    );
+    git(repo.path(), &["push", "-u", "fork", "main"]);
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let wt = repo.path().join(".wt/1");
+    fs::write(wt.join("feature.txt"), "not merged").unwrap();
+    git(&wt, &["add", "."]);
+    git(&wt, &["commit", "-m", "feature commit"]);
+    git(&wt, &["push", "-u", "fork", "feature"]);
+    grove()
+        .args(["clean"])
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("No merged worktrees to clean"));
+    assert!(wt.exists());
+}
+
+#[test]
+fn test_clean_detects_remote_merge_when_local_main_is_stale() {
+    let remote = TempDir::new().unwrap();
+    let repo = setup_git_repo();
+    assert!(
+        StdCommand::new("git")
+            .args(["init", "--bare", remote.path().to_str().unwrap()])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["remote", "add", "origin", remote.path().to_str().unwrap()])
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["push", "-u", "origin", "main"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let stale_main = String::from_utf8(
+        StdCommand::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+
+    grove()
+        .args(["add", "feature"])
+        .current_dir(repo.path())
+        .assert()
+        .success();
+    let wt = repo.path().join(".wt/1");
+    fs::write(wt.join("feature.txt"), "merged content").unwrap();
+    assert!(
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(&wt)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["commit", "-m", "feature commit"])
+            .current_dir(&wt)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["push", "-u", "origin", "feature"])
+            .current_dir(&wt)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["merge", "--squash", "feature"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["commit", "-m", "squash feature"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["push", "origin", "main"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        StdCommand::new("git")
+            .args(["reset", "--hard", stale_main.trim()])
+            .current_dir(repo.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+
+    grove()
+        .args(["clean"])
+        .current_dir(repo.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Removing 'feature'"));
+    assert!(
+        !wt.exists(),
+        "merged worktree should be removed despite stale local main"
+    );
+}
+
+#[test]
 fn test_clean_checks_upstream_branch() {
     let dir = setup_git_repo();
 
